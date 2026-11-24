@@ -128,6 +128,42 @@
       "status": "pending-fix",
       "value": "```text\nnot a fence\n```",
       "observed": "{\"tables\":[[2,2,2]],\"verdicts\":1,\"headings\":[\"## Stellar Protocol Canary\",\"### Result\",\"#### Failures\"],\"failureBullets\":1}"
+    },
+    {
+      "name": "unicode-zero-width-space",
+      "layer": "markdown",
+      "status": "enforced",
+      "value": "zero\u200Bwidth space"
+    },
+    {
+      "name": "unicode-zero-width-non-joiner",
+      "layer": "markdown",
+      "status": "enforced",
+      "value": "zero\u200Cwidth non-joiner"
+    },
+    {
+      "name": "unicode-zero-width-joiner",
+      "layer": "markdown",
+      "status": "enforced",
+      "value": "zero\u200Dwidth joiner"
+    },
+    {
+      "name": "unicode-left-to-right-mark",
+      "layer": "markdown",
+      "status": "enforced",
+      "value": "left-to-right \u200Emark text"
+    },
+    {
+      "name": "unicode-right-to-left-mark",
+      "layer": "markdown",
+      "status": "enforced",
+      "value": "right-to-left \u200Fmark text"
+    },
+    {
+      "name": "unicode-word-joiner-command",
+      "layer": "workflow-command",
+      "status": "enforced",
+      "value": "word\u2060joiner command text"
     }
   ]
 }
