@@ -30,9 +30,39 @@ jobs:
           path: canary-fixtures
 
       - name: Stellar Protocol Canary
+        # The `id` is what makes a step's outputs addressable: downstream
+        # steps read them as `steps.canary.outputs.<name>`.
+        id: canary
         uses: StellarCanary/ProtocolCanary-Action@v1
         with:
           protocol: "28"
           fixtures-dir: canary-fixtures/protocol-28
           network: testnet
           rpc-url: https://soroban-testnet.stellar.org
+
+      # Read the verdict from the outputs rather than from the console log.
+      # Pass them through `env:` instead of interpolating them into the shell
+      # script. `status` is always set (`pass`, `warning`, `fail`, `error`, or
+      # `execution-failed`); `report` is an absolute path that is empty when
+      # Canary produced no parsable report, so check `status` first. The Action
+      # has no `exit-code` output — that one belongs to the reusable workflow
+      # in .github/workflows/reusable-canary-check.yml.
+      - name: Check canary verdict
+        env:
+          CANARY_STATUS: ${{ steps.canary.outputs.status }}
+          CANARY_REPORT: ${{ steps.canary.outputs.report }}
+          CANARY_SKIPPED: ${{ steps.canary.outputs.skipped }}
+        run: |
+          set -euo pipefail
+          echo "canary status: $CANARY_STATUS (skipped checks: $CANARY_SKIPPED)"
+          if [ -n "$CANARY_REPORT" ]; then
+            echo "report: $CANARY_REPORT"
+          fi
+          test "$CANARY_STATUS" = pass
+
+      # Gate a promotion on coverage as well as on the verdict: `pass` with
+      # `coverage-state: partial` means some fixtures were skipped, and `none`
+      # means nothing ran at all.
+      - name: Publish compatibility evidence
+        if: steps.canary.outputs.status == 'pass' && steps.canary.outputs.coverage-state == 'full'
+        run: echo "Protocol 28 evidence verified."

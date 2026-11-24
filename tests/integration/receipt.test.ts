@@ -1,4 +1,5 @@
 import type * as actionsCore from "@actions/core";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -109,6 +110,7 @@ const ENV_KEYS = [
   "INPUT_PROTOCOL",
   "INPUT_CONFIG",
   "INPUT_NETWORK",
+  "INPUT_NETWORK-PASSPHRASE",
   "INPUT_RPC-URL",
   "INPUT_FIXTURES-DIR",
   "INPUT_UPLOAD-REPORT",
@@ -131,18 +133,23 @@ const SUMMARY_PATH = path.join(os.tmpdir(), `canary-receipt-e2e-summary-${String
 function setUp(stubReport: unknown): Fixture {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "canary-receipt-e2e-"));
   const cargoHome = path.join(workDir, "cargo-home");
-  fs.mkdirSync(path.join(cargoHome, "bin"), { recursive: true });
-  const binaryPath = path.join(cargoHome, "bin", "stellar-canary");
-  fs.writeFileSync(binaryPath, stubCanarySource(stubReport), "utf8");
-  fs.chmodSync(binaryPath, 0o755);
+  fs.mkdirSync(cargoHome, { recursive: true });
 
   const runnerTemp = path.join(workDir, "runner-temp");
-  fs.mkdirSync(runnerTemp, { recursive: true });
+  const binaryDir = path.join(runnerTemp, "stellar-canary-action", "bin");
+  fs.mkdirSync(binaryDir, { recursive: true });
+  const binaryPath = path.join(binaryDir, "stellar-canary");
+  fs.writeFileSync(binaryPath, stubCanarySource(stubReport), "utf8");
+  fs.chmodSync(binaryPath, 0o755);
+  const digest = crypto.createHash("sha256").update(fs.readFileSync(binaryPath)).digest("hex");
+  fs.writeFileSync(path.join(binaryDir, "stellar-canary.sha256"), `${digest}\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(binaryDir, "stellar-canary.origin"), "source-build\n", { mode: 0o600 });
   const outputPath = path.join(workDir, "github-output");
   fs.writeFileSync(outputPath, "");
   fs.writeFileSync(SUMMARY_PATH, "");
 
   for (const key of ENV_KEYS) delete process.env[key];
+  process.env["INPUT_NETWORK-PASSPHRASE"] = "\u0001";
   process.env.CARGO_HOME = cargoHome;
   process.env.RUNNER_TEMP = runnerTemp;
   process.env.GITHUB_OUTPUT = outputPath;
@@ -150,7 +157,11 @@ function setUp(stubReport: unknown): Fixture {
   process.env.GITHUB_RUN_ID = "4321";
   process.env.INPUT_VERSION = "0.1.0";
   process.env.INPUT_PROTOCOL = "28";
-  process.env["INPUT_FIXTURES-DIR"] = "fixtures";
+  // #400: run() validates fixtures-dir on disk before version resolution
+  // and installation, so the input must point at an existing directory.
+  const fixturesDir = path.join(workDir, "fixtures");
+  fs.mkdirSync(fixturesDir);
+  process.env["INPUT_FIXTURES-DIR"] = fixturesDir;
   process.env["INPUT_UPLOAD-REPORT"] = "false";
   process.env["INPUT_ANNOTATIONS"] = "false";
   process.env["INPUT_TIMEOUT-MINUTES"] = "1";
@@ -212,7 +223,10 @@ describe.skipIf(process.platform === "win32")("Execution Receipt integration (re
 
     expect(setFailedMock).not.toHaveBeenCalled();
     const outputs = readOutputs(fixture.outputPath);
-    const receiptPath = path.join(fixture.runnerTemp, "stellar-canary-receipt.json");
+    const receiptPath = outputs["receipt-path"] as string;
+    expect(path.isAbsolute(receiptPath)).toBe(true);
+    expect(path.dirname(receiptPath)).toBe(fixture.runnerTemp);
+    expect(fs.existsSync(receiptPath)).toBe(true);
 
     const actual = fs.readFileSync(receiptPath);
     // Byte fixed point: re-serializing the parsed artifact through the real
@@ -254,7 +268,10 @@ describe.skipIf(process.platform === "win32")("Execution Receipt integration (re
     await run();
 
     const outputs = readOutputs(fixture.outputPath);
-    const receiptPath = path.join(fixture.runnerTemp, "stellar-canary-receipt.json");
+    const receiptPath = outputs["receipt-path"] as string;
+    expect(path.isAbsolute(receiptPath)).toBe(true);
+    expect(path.dirname(receiptPath)).toBe(fixture.runnerTemp);
+    expect(fs.existsSync(receiptPath)).toBe(true);
     expect(outputs["receipt-path"]).toBe(receiptPath);
     expect(outputs.status).toBe("pass");
     expect(uploadArtifactMock).toHaveBeenCalledWith(
@@ -271,7 +288,7 @@ describe.skipIf(process.platform === "win32")("Execution Receipt integration (re
     await run();
 
     expect(setFailedMock).not.toHaveBeenCalled();
-    const receiptText = fs.readFileSync(path.join(fixture.runnerTemp, "stellar-canary-receipt.json"), "utf8");
+    const receiptText = fs.readFileSync(readOutputs(fixture.outputPath)["receipt-path"] as string, "utf8");
     expect(receiptText).not.toContain(SYNTHETIC_TOKEN.slice(0, 12));
     expect(receiptText).not.toContain("/home/runner");
     expect(receiptText).toContain("[REDACTED]");

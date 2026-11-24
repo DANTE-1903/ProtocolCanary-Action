@@ -139,10 +139,21 @@ export function fencedBlock(text: string): string {
  * single quotes by closing the quote, adding an escaped single quote, and
  * reopening it: `foo'\''bar`. Arguments containing only characters with no
  * special meaning are left unquoted for readability.
+ *
+ * `=` is inert in an option-shaped argument (issue #606), so `--network=testnet`
+ * is left unquoted as well: the leading `-` rules out both positions where the
+ * shell reads `=` as syntax, an assignment prefix (`NAME=value command`) and
+ * zsh's `=command` path expansion, which needs the word to start with `=`.
+ * Every other use of `=` stays quoted, including a bare `NAME=value` word.
  */
 export function quoteForShell(arg: string): string {
   // If the argument contains no special characters, leave it unquoted
   if (/^[A-Za-z0-9_./@:-]+$/.test(arg)) {
+    return arg;
+  }
+  // An option-shaped argument: `-` first, then nothing but inert characters
+  // and `=`. A leading `=`, a space, or any metacharacter falls through.
+  if (/^-[A-Za-z0-9_./@:=-]+$/.test(arg)) {
     return arg;
   }
   // Otherwise, wrap in single quotes and escape any embedded single quotes

@@ -1,0 +1,75 @@
+name: Engine release asset compatibility
+
+# Consumer-side check of the published Protocol-Canary v0.3.0 release archives.
+# Unlike engine-compat.yml (which builds the engine from source) and the Engine
+# release workflow (publisher-side archive smoke checks), this runs this
+# repository's Action with `strict-integrity: true`, so the real installation
+# path is exercised: platform asset selection, release download, checksum
+# verification, extraction, and the Action-to-Engine run. The Action never
+# falls back to a source build or a preinstalled binary under strict-integrity,
+# so a missing archive, a checksum failure, a wrong platform asset or a
+# source-build fallback fails the job. The scenario is offline: no secrets and
+# no live RPC. Manual only, like the other engine compatibility workflows.
+#
+# v0.3.0 publishes four archives: Linux x86_64, macOS x86_64, macOS arm64 and
+# Windows x86_64. It has no Linux arm64 archive, so that target is not covered.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-assets:
+    name: Engine v0.3.0 archive (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            os: ubuntu-latest
+          - target: macos-x86_64
+            os: macos-15-intel
+          - target: macos-arm64
+            os: macos-latest
+          - target: windows-x86_64
+            os: windows-latest
+    steps:
+      - name: Checkout Action
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Engine v0.3.0 and run the offline Protocol 28 XDR scenario
+        id: canary
+        uses: ./ # zizmor: ignore[self-repository] root composite action executed from source within this repository
+        with:
+          version: "0.3.0"
+          strict-integrity: "true"
+          protocol: "28"
+          config: tests/fixtures/real-engine/offline.stellar-canary.toml
+          fixtures-dir: tests/fixtures/real-engine/fixtures
+          allow-empty: "false"
+          upload-report: "false"
+          annotations: "false"
+
+      - name: Confirm a successful Engine v0.3.0 result
+        shell: bash
+        env:
+          STATUS: ${{ steps.canary.outputs.status }}
+          PASSED: ${{ steps.canary.outputs.passed }}
+          TOTAL: ${{ steps.canary.outputs.total }}
+          FAILURES: ${{ steps.canary.outputs.failures }}
+          ERRORS: ${{ steps.canary.outputs.errors }}
+          ENGINE_VERSION: ${{ steps.canary.outputs.engine-version }}
+          REPORT: ${{ steps.canary.outputs.report }}
+        run: |
+          echo "status=$STATUS passed=$PASSED total=$TOTAL failures=$FAILURES errors=$ERRORS engine=$ENGINE_VERSION"
+          [ "$ENGINE_VERSION" = "0.3.0" ] || { echo "::error::Expected Engine 0.3.0, resolved '$ENGINE_VERSION'"; exit 1; }
+          [ "$STATUS" = "pass" ] || { echo "::error::Expected status pass, got '$STATUS'"; exit 1; }
+          [ "$FAILURES" = "0" ] && [ "$ERRORS" = "0" ] || { echo "::error::Expected no failures or errors"; exit 1; }
+          [ "${TOTAL:-0}" -ge 1 ] && [ "${PASSED:-0}" -ge 1 ] || { echo "::error::A zero-check run is not a usable result"; exit 1; }
+          [ -n "$REPORT" ] && [ -f "$REPORT" ] || { echo "::error::No report file was produced"; exit 1; }

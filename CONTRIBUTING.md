@@ -9,15 +9,28 @@ Node 24. The root [`.nvmrc`](.nvmrc) pins it (`nvm use`), matching the
 code and local setup should target 24. npm is the package manager; the
 lockfile (`package-lock.json`) is committed and authoritative.
 
+Three command-line tools must also be on `PATH`: `bash`, `jq`, and
+`python3`. The reusable-workflow conformance tests
+(`tests/unit/reusable-workflow-conformance.test.ts`) execute the shipped
+step scripts with `bash`, parse the GitHub artifacts listing with `jq`,
+and build and unpack the zip fixtures with `python3`. GitHub-hosted
+runners ship all three. When one is missing on a local machine, exactly
+the tests that need it are skipped with a message naming the tool; when
+one is missing in CI (the `CI` environment variable is set), that test
+file fails with a single error naming it instead, so a runner image that
+loses a tool can never silently skip the conformance tests.
+
 ```bash
 npm ci
+npm run audit
+npm run check:licenses
 npm run typecheck
 npm run lint
 npm test
 npm run build
 ```
 
-All four must pass before a change is considered done — this is exactly
+All must pass before a change is considered done — this is exactly
 what `.github/workflows/ci.yml` runs, plus a check that the committed
 `dist/` matches a fresh build (see [Build](#build) below).
 
@@ -55,10 +68,26 @@ npm run typecheck    # tsc --noEmit, strict mode
 npm run lint         # eslint
 npm test             # vitest run (unit + integration, includes workflow-policy.test.ts)
 npm run test:coverage  # vitest run with v8 coverage over src/ (text, HTML, and lcov reports in coverage/)
+npm run audit        # npm audit --omit=dev --audit-level=high
+npm run check:licenses # license allow-list verification for production dependencies
 npm run build         # esbuild bundle to dist/index.js
 actionlint           # static analysis of .github/workflows/
 zizmor .github/workflows # security audit of .github/workflows/
 ```
+
+### Updating job summary goldens
+
+The job summary's exact Markdown output is stored in `tests/golden/` and
+checked by `tests/unit/summary-golden.test.ts`. To intentionally update the
+snapshots, run:
+
+```bash
+UPDATE_GOLDEN=1 npx vitest run tests/unit/summary-golden.test.ts
+```
+
+Review every changed golden file by hand. A pull request that changes a
+golden must explain why the summary format changed; do not update snapshots
+just to make a failing test pass.
 
 ### Trying the Action locally without GitHub
 
@@ -107,14 +136,22 @@ the codebase, these thresholds are ratcheted upward. Run `npm run test:coverage`
 locally to verify your changes satisfy the coverage gate.
 
 Unit and integration tests must never require network access or a real
-`stellar-canary` binary: they run against
+`stellar-canary` binary by default: they run against
 [`tests/fixtures/mock-canary.cjs`](tests/fixtures/mock-canary.cjs), a fake
 CLI that simulates every documented result state (`pass`, `warning`,
 `fail`, `config-error`, `rpc-error`, `fixture-error`, `internal-error`,
 `malformed-json`, `timeout`) via the `MOCK_CANARY_SCENARIO` environment
-variable. `.github/workflows/integration.yml` is the only place this
-repository talks to a real Canary build and a real Testnet endpoint, and it
-never gates a pull request.
+variable. Real-engine checks run separately: `.github/workflows/weekly-live.yml`
+runs on a weekly schedule or manual dispatch against a real Canary build and
+live Testnet/Futurenet endpoints (network required);
+`.github/workflows/engine-compat.yml` runs only on manual dispatch, builds
+real engines from source, and exercises offline scenarios without network
+access; `tests/integration/real-engine.test.ts` is skipped unless
+`STELLAR_CANARY_BIN` points to a real engine. The `smoke-test` job in
+`.github/workflows/release.yml` runs the published Action with a real engine
+after a version-tag release or on manual dispatch. None of these real-engine
+workflows gates a pull request; `.github/workflows/ci.yml` provides the
+required pull-request checks.
 
 For tests that need to observe what the Action reports through
 `@actions/core`, use the partial-mock convention described in [Mocking
@@ -269,16 +306,53 @@ docs: document the fixtures-dir input
 
 Update explicitly (`chore(deps): update @actions/core`), never silently as
 a side effect of another change. Re-run the full test/lint/build sequence
-after any dependency bump, and run `npm audit` — fix or explicitly justify
-any new advisory before merging.
+after any dependency bump, run `npm run audit`, and run `npm run check:licenses` —
+fix or explicitly justify any new advisory before merging.
 
 Dependabot also opens automated update PRs for the npm and
 `github-actions` ecosystems on a weekly schedule (see
 `.github/dependabot.yml`), so some dependency updates arrive without
 anyone hand-writing a `chore(deps):` commit. Those PRs are held to the
 same review expectations as any other change: re-run the full
-test/lint/build sequence and `npm audit` before merging one, and either
-fix or explicitly justify any new advisory in the PR.
+test/lint/build sequence, `npm run audit`, and `npm run check:licenses`
+before merging one, and either fix or explicitly justify any new advisory in the PR.
+
+### Dependency audit and vulnerability handling
+
+CI runs `npm run audit` (`npm audit --omit=dev --audit-level=high`) on every
+pull request and on a weekly schedule to detect high or critical advisories in
+the production dependency tree that bundles into `dist/index.js`.
+
+- **Report only in CI**: Do **not** use `npm audit fix` in CI. Vulnerabilities must
+  be explicitly reviewed and resolved or triaged by maintainers.
+- **When an audit reports a finding with a fix available**: Update the affected
+  direct or transitive dependency (e.g. via `npm update <package>` or explicit
+  package bump), re-run `npm run build`, and commit both `package-lock.json` and
+  updated `dist/`.
+- **When an audit reports a finding with NO fix available yet**:
+  1. **Assess reachability and impact**: Determine whether the vulnerable code path
+     in the transitive dependency is reachable in the context of this Action's bundle
+     and execution model.
+  2. **Check for upstream workarounds**: Check if an override in `package.json`
+     (`overrides` field) can safely pin a patched transitive version without breaking
+     runtime behavior.
+  3. **Document and track**: If no upstream fix or safe override is available and the
+     vulnerability is deemed unexploitable or low risk in the Action's context, open
+     an issue or record the justification in the pull request review referencing the
+     upstream advisory tracking issue. Temporary audit exceptions must be reviewed
+     and approved by repository maintainers.
+
+### License compliance checks
+
+Production dependencies are verified against an allow-list located in
+[`.licenses-allowlist.json`](.licenses-allowlist.json).
+
+- Run `npm run check:licenses` locally to verify production dependencies.
+- Allowed licenses include standard permissive licenses (`MIT`, `Apache-2.0`,
+  `ISC`, `BSD-2-Clause`, `BSD-3-Clause`, `0BSD`, `BlueOak-1.0.0`, etc.).
+- If a legitimate new production dependency or package with dual/custom licensing
+  is added, propose updating `.licenses-allowlist.json` in the same pull request
+  with maintainer review.
 
 ## Updating Canary compatibility
 
@@ -355,56 +429,61 @@ Action rather than an engine logic defect:
   Timeout handling and process termination in `src/runner.ts` must account for
   these differences.
 
-## Pinning the fixtures pack (weekly live workflow)
+## Pinning the fixtures packs (weekly live workflow)
 
-`.github/workflows/weekly-live.yml` checks out
-`StellarCanary/ProtocolCanary-Fixtures` at a recorded immutable commit —
-the full commit SHA behind the `protocol-28` tag, written on the
-"Checkout ProtocolCanary-Fixtures" step — so a scheduled canary changes
-only when the network or the pinned inputs change. A fixture merged into
-the fixtures repository's default branch between runs has no effect on
-Monday's result, and every run prints the commit it actually tested in the
-step summary ("Fixtures pack under test"). This is the same reason the
-repository publishes immutable pack tags in the first place.
+The weekly workflow runs two independent network checks with **Engine v0.3.0**:
 
-**When the pin moves:** only when `ProtocolCanary-Fixtures` publishes a new
-pack release (a new immutable tag — a future `protocol-29`, for example)
-*and* this repository decides to start testing that pack. It never moves
-because something landed on the fixtures default branch, because a network
-changed, or as a side effect of an unrelated pull request here. Each pin
-move is its own pull request.
+| Network | Scope | Immutable Fixtures commit | Path |
+| --- | --- | --- | --- |
+| Testnet | Protocol 30 `getVersionInfo.protocolVersion == 30` identity only | `9feb1a85f64cd43201685fe233bf9ef15a38a752` | `fixtures/protocol-30` |
+| Futurenet | Protocol 30 `getVersionInfo.protocolVersion == 30` identity only | `9feb1a85f64cd43201685fe233bf9ef15a38a752` | `fixtures/protocol-30` |
 
-**Who approves it:** the repository maintainer
-([@Hollujay](https://github.com/Hollujay), the [CODEOWNERS](.github/CODEOWNERS)
-owner), recorded as the approving reviewer on that pull request.
+The Protocol 30 commit is **not a released fixture pack**. Its one RPC
+identity fixture and Testnet evidence were reviewed in Fixtures PRs #488
+and #489. The weekly workflow runs that identity assertion independently
+against both network endpoints; it does not establish Protocol 30 XDR,
+Soroban, transaction semantics, or broader Futurenet or Mainnet compatibility.
 
-**How to move it:**
+Scheduled runs use each matrix leg's immutable commit, protocol and path.
+A manual dispatch may supply `fixtures_ref` to override the checkout
+commit for **both** legs; that ref must contain both selected pack paths
+or the missing-pack check will fail. Overrides never change scheduled pins.
 
-1. resolve the new tag to its full (dereferenced) commit SHA:
+**How to update a pin:** only a maintainer-approved PR may change a
+matrix leg's `fixtures_commit`, `protocol` and `fixtures_dir`. For a
+published pack, resolve the release tag to its peeled commit with
+`git ls-remote ... 'refs/tags/<tag>*'` and cite the release URL.
+For an unreleased Protocol 30 candidate, cite the exact merged Fixtures
+commit and verification evidence; do not describe it as published.
+Keep each network's passphrase, RPC endpoint and other lane unchanged
+unless separately justified by live evidence. Update the tests in
+`tests/unit/weekly-live-fixture-pack.test.ts` and run `actionlint`,
+`zizmor` and the complete test workflow before merging.
+The approving reviewer is the CODEOWNERS maintainer.
 
-   ```bash
-   git ls-remote https://github.com/StellarCanary/ProtocolCanary-Fixtures.git refs/tags/<tag>
-   ```
+## Tracking weekly live failures
 
-   For an annotated tag take the SHA of the `^{}` (peeled) line — that is
-   the commit, not the tag object.
-2. in `.github/workflows/weekly-live.yml`, replace the SHA in `ref:` on the
-   "Checkout ProtocolCanary-Fixtures" step and update that step's comment
-   (tag name and both SHAs) in the same commit, so the pin stays recorded
-   in exactly one place.
-3. if the new pack lives in a different directory, update `fixtures-dir:`
-   (and the workflow name/header comment) in the same commit.
-4. link the fixtures pack release (and its tracking issue, if any) in the
-   pull request description.
-5. run `actionlint .github/workflows/weekly-live.yml` before requesting
-   review.
+A repeated scheduled failure should not open a new issue every Monday. The
+`track-failure` job in `.github/workflows/weekly-live.yml` keeps exactly one
+tracking issue per failure episode, labelled **`weekly-live`**:
 
-Manual dispatch runs may override the pin temporarily with the
-`fixtures_ref` input — any tag, branch, or commit, for example to
-candidate-test a pack before moving the pin. Scheduled runs ignore the
-input and always use the recorded SHA. A `fixtures_ref` that does not
-exist fails the job at checkout with the checkout step's own error; that
-is expected and leaves the pin untouched.
+- on the **first failing run** it opens a new issue titled
+  "Weekly live canary is failing (Testnet/Futurenet)";
+- while the canary stays red it **comments** on that same issue (it never
+  opens a second one, even if several runs fail in a row);
+- once a run goes **fully green** it comments on the open issue and closes
+  it with `--reason completed`; a later failure reopens the cycle by
+  creating a fresh issue.
+
+The tracker uses `GH_REPO` because its job does not check out a working tree.
+If the label is missing, the job creates it with its existing `issues: write`
+permission before querying or creating the tracking issue. API and permission
+errors still fail the job; they are not treated as a missing label. The
+issue-writing job runs only for the `main` ref, including scheduled runs.
+
+The `track-failure` job is the only job in the workflow granted
+`issues: write`, and it is scoped to that job; every other job stays at the
+workflow default of `contents: read`.
 
 ## Release process
 
@@ -454,4 +533,3 @@ Release checklist:
    ```
    or trigger the **Release** workflow from the Actions tab in GitHub and enter
    the target tag in the `release_tag` input field.
-

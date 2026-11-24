@@ -3,7 +3,15 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+
+import { TempDirTracker } from "./helpers";
+
+const tracker = new TempDirTracker();
+
+afterEach(() => {
+  tracker.cleanup();
+});
 
 /**
  * #369: least-privilege permissions and fork PR trust boundaries.
@@ -82,7 +90,7 @@ interface RunResult {
 }
 
 function runScript(script: string, env: Record<string, string>, curlStub?: string): RunResult {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "l75-fork-boundary-"));
+  const dir = tracker.track(fs.mkdtempSync(path.join(os.tmpdir(), "l75-fork-boundary-")));
   const scriptPath = path.join(dir, "step.sh");
   fs.writeFileSync(scriptPath, script);
   // With a stub, run the step inside the shell that also defines the stub:
@@ -104,7 +112,7 @@ function runScript(script: string, env: Record<string, string>, curlStub?: strin
 
 /** Materialises a fixture workflow file and returns its path. */
 function fixtureWorkflow(name: string, body: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "l75-fixture-"));
+  const dir = tracker.track(fs.mkdtempSync(path.join(os.tmpdir(), "l75-fixture-")));
   const file = path.join(dir, name);
   fs.writeFileSync(file, body);
   return file;
@@ -155,6 +163,25 @@ describe("test-fork-boundary workflow (#369)", () => {
       ).not.toContain("::error::");
       expect(result.status, `audit of ${target} must exit 0`).toBe(0);
     }
+  });
+
+  it("audits the shipped reusable workflow and releases its temporary directory (#628)", () => {
+    const script = extractRunScript(workflowSource(), "fork-boundary-audit");
+    const trackedBefore = tracker.size;
+    const result = runScript(script, { TARGET_WORKFLOW: REUSABLE_PATH });
+
+    // Exit 0 with no ::error:: lines means the reusable workflow passed every
+    // check the shipped audit performs: least-privilege scopes, no persisted
+    // checkout credentials, and no secret bridges beyond github-token.
+    expect(result.status, `audit of ${REUSABLE_PATH} must exit 0`).toBe(0);
+    expect(result.stdout + result.stderr).not.toContain("::error::");
+    expect(result.stdout).toContain("fork-boundary audit passed");
+
+    // runScript registers the directory holding the extracted step script, so
+    // the suite owns its lifetime instead of leaking it into the temp dir.
+    expect(tracker.size).toBe(trackedBefore + 1);
+    tracker.cleanup();
+    expect(tracker.size).toBe(0);
   });
 
   it("audit script fails closed on workflows that request write or elevated scopes (#369 negative)", () => {
@@ -265,5 +292,17 @@ describe("test-fork-boundary workflow (#369)", () => {
       const result = runScript(script, { TARGET_WORKFLOW: file });
       expect(result.status, `doc example ${index} violates the boundary: ${result.stdout}${result.stderr}`).toBe(0);
     }
+  });
+
+  it("cleans up temporary directories so none are left behind (#501)", () => {
+    const file = fixtureWorkflow("guard.yml", "name: test\n");
+    const parentDir = path.dirname(file);
+    expect(tracker.has(parentDir)).toBe(true);
+    expect(fs.existsSync(parentDir)).toBe(true);
+
+    tracker.cleanup();
+
+    expect(fs.existsSync(parentDir)).toBe(false);
+    expect(tracker.has(parentDir)).toBe(false);
   });
 });

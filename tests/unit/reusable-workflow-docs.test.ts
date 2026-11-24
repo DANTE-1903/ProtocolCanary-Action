@@ -238,4 +238,25 @@ describe("reusable-workflow.md integration guide (#371)", () => {
     const readme = fs.readFileSync(path.join(REPO_ROOT, "README.md"), "utf8");
     expect(readme).toContain("docs/reusable-workflow.md");
   });
+
+  it("distinguishes the workflow project-root input from the single-step working-directory input", () => {
+    const workflow = fs.readFileSync(
+      path.join(REPO_ROOT, ".github", "workflows", "reusable-canary-check.yml"),
+      "utf8",
+    );
+    const action = fs.readFileSync(path.join(REPO_ROOT, "action.yml"), "utf8");
+    // project-root is a reusable workflow input; working-directory is not.
+    expect(workflow).toMatch(/^ {6}project-root:/m);
+    expect(workflow).not.toMatch(/^ {6}working-directory:/m);
+    // working-directory is a single-step Action input; project-root is not.
+    expect(action).toMatch(/^ {2}working-directory:/m);
+    expect(action).not.toMatch(/^ {2}project-root:/m);
+
+    const doc = docText();
+    expect(doc).not.toMatch(/no `working-directory` input/i);
+    const limitation = doc.slice(doc.indexOf("## Limitations"));
+    expect(limitation).toMatch(/workflow accepts `project-root`/);
+    expect(limitation).toMatch(/single-step\s+Action separately accepts `working-directory`/);
+    expect(limitation).toMatch(/does not forward `working-directory`/);
+  });
 });

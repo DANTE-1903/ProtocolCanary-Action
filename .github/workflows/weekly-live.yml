@@ -1,57 +1,39 @@
-name: Weekly live integration (Protocol 29)
+name: Weekly live integration (Protocol 30 Testnet/Futurenet identity)
 
-# Exercises the real three-repository pipeline end to end: this Action,
-# the real Protocol-Canary CLI (built from source via `cargo install`),
-# the real StellarCanary/ProtocolCanary-Fixtures pack, and LIVE Protocol 29
-# test-network RPC endpoints. Renamed from `integration.yml` (same weekly
-# schedule) and repaired for Protocol 29 (#352): the old file still targeted
-# Protocol 28 after Testnet/Futurenet moved to protocol 29, so the weekly run
-# failed against the updated networks.
-#
-# This is intentionally separate from ci.yml: Testnet/Futurenet availability
-# must never be a prerequisite for the ordinary unit-test workflow that gates
-# pull requests, so this runs only on the weekly schedule and on manual
-# dispatch.
-#
-# The Fixtures checkout is pinned to the immutable `protocol-28` pack tag
-# (recorded as a full commit SHA on the checkout step) so the scheduled run
-# changes only when the network or the pinned inputs change: a fixture
-# merged into ProtocolCanary-Fixtures on Sunday cannot move Monday's result
-# (#419). Each run prints the commit it actually tested in the step
-# summary. Scheduled runs always use the pin; a manual dispatch may
-# override it with the `fixtures_ref` input. Moving the pin is documented
-# in CONTRIBUTING.md ("Pinning the fixtures pack").
-#
-# Network configuration (the current Protocol 29 test networks):
-#   testnet  — passphrase "Test SDF Network ; September 2015",
-#              RPC https://soroban-testnet.stellar.org
-#   futurenet — passphrase "Test SDF Future Network ; October 2022",
-#              RPC https://rpc-futurenet.stellar.org
-# The Action selects the network (and therefore the matching passphrase)
-# with `network:`; `rpc-url:` pins the Protocol 29 endpoint explicitly. The
-# passphrase is repeated in `env`/`NETWORK_PASSPHRASE` below so every job
-# log records exactly which network the canary ran against.
+# Run published Engine v0.3.0 against an immutable Protocol 30 identity
+# fixture. Its captured evidence is from Testnet; each live leg independently
+# checks that its RPC endpoint reports Protocol 30. This does not test full
+# XDR, Soroban, transaction, Futurenet, or Mainnet Protocol 30 compatibility.
+# Live failures are separate from PR-gating CI. Manual fixtures_ref overrides
+# apply to both legs; scheduled runs use the matrix pins.
+# Only the main-branch tracking job writes issues. See CONTRIBUTING.md.
 
 on:
   workflow_dispatch:
     inputs:
       fixtures_ref:
-        description: ProtocolCanary-Fixtures tag, branch or commit to test instead of the pinned protocol-28 pack (empty = the pin)
+        description: Optional Fixtures ref for both networks; empty uses each network-specific immutable pin
         required: false
         default: ""
   schedule:
     - cron: "17 6 * * 1" # weekly, Monday 06:17 UTC
 
+# The default token is read-only; the `track-failure` job widens its own
+# scope to `issues: write` (job-level), and no other job gains any write
+# permission. Keeping this here means every job is read-only unless it
+# explicitly opts in.
 permissions:
   contents: read
 
 env:
-  TARGET_PROTOCOL: "29"
+  # The label that identifies the single open tracking issue (#420).
+  TRACKING_LABEL: weekly-live
 
 jobs:
   live-check:
-    name: Live canary (Protocol 29 ${{ matrix.network }})
+    name: Live canary (Protocol ${{ matrix.protocol }} ${{ matrix.network }})
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       # Both legs must run even when one network is down, so a Testnet outage
       # still tells us whether Futurenet is healthy (and vice versa).
@@ -59,12 +41,21 @@ jobs:
       matrix:
         include:
           - network: testnet
+            protocol: "30"
+            fixtures_commit: 9feb1a85f64cd43201685fe233bf9ef15a38a752
+            fixtures_label: Protocol 30 RPC identity (unreleased commit)
+            fixtures_dir: fixtures/protocol-30
             rpc-url: https://soroban-testnet.stellar.org
             passphrase: "Test SDF Network ; September 2015"
           - network: futurenet
+            protocol: "30"
+            fixtures_commit: 9feb1a85f64cd43201685fe233bf9ef15a38a752
+            fixtures_label: Protocol 30 RPC identity (unreleased commit)
+            fixtures_dir: fixtures/protocol-30
             rpc-url: https://rpc-futurenet.stellar.org
             passphrase: "Test SDF Future Network ; October 2022"
     env:
+      TARGET_PROTOCOL: ${{ matrix.protocol }}
       NETWORK_NAME: ${{ matrix.network }}
       NETWORK_RPC_URL: ${{ matrix.rpc-url }}
       NETWORK_PASSPHRASE: ${{ matrix.passphrase }}
@@ -79,20 +70,17 @@ jobs:
         with:
           repository: StellarCanary/ProtocolCanary-Fixtures
           path: fixtures
-          # Immutable pin (#419): the full commit SHA behind the `protocol-28`
-          # tag (tag object 285d7fc → commit 75ec2c2), recorded here so the
-          # scheduled run tests exactly that pack. Move the pin only when the
-          # fixtures repository publishes a new pack release, in its own PR —
-          # see "Pinning the fixtures pack" in CONTRIBUTING.md. A manual run
-          # overrides this with the `fixtures_ref` workflow input; a ref that
-          # does not exist fails the job at this step.
-          ref: ${{ inputs.fixtures_ref || '75ec2c293a44f09d9c8c1f76722a24a2334ac20a' }}
+          # P30 is a merged Fixtures commit, not a published release. The
+          # single RPC identity fixture is exercised against both networks.
+          ref: ${{ inputs.fixtures_ref || matrix.fixtures_commit }}
           persist-credentials: false
 
       - name: Record the fixtures pack under test
         shell: bash
         env:
           REQUESTED_FIXTURES_REF: ${{ inputs.fixtures_ref }}
+          PINNED_FIXTURES_LABEL: ${{ matrix.fixtures_label }}
+          SELECTED_FIXTURES_DIR: ${{ matrix.fixtures_dir }}
         run: |
           set -euo pipefail
           commit=$(git -C fixtures rev-parse HEAD)
@@ -100,25 +88,24 @@ jobs:
           if [ -n "${REQUESTED_FIXTURES_REF:-}" ]; then
             requested="${REQUESTED_FIXTURES_REF} (manual fixtures_ref override)"
           else
-            requested="pinned protocol-28 tag (workflow pin)"
+            requested="${PINNED_FIXTURES_LABEL} (workflow pin)"
           fi
           {
             echo "### Fixtures pack under test"
             echo ""
             echo "- Requested ref: \`${requested}\`"
             echo "- Resolved commit: \`${commit}\`"
-            echo "- Pack directory: \`fixtures/protocol-28\`"
+            echo "- Pack directory: \`${SELECTED_FIXTURES_DIR}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run Stellar Protocol Canary (this Action, from source)
+        id: run
         uses: ./ # zizmor: ignore[self-repository] root composite action executed from source within this repository
         with:
-          protocol: "29"
-          # Pack from the pinned fixtures ref above (`protocol-28`); when
-          # ProtocolCanary-Fixtures ships a Protocol 29 pack, move the pin
-          # and this path in the same PR (CONTRIBUTING.md, "Pinning the
-          # fixtures pack").
-          fixtures-dir: fixtures/protocol-28
+          # Engine v0.3.0 supports get-version-info for both selected packs.
+          version: "0.3.0"
+          protocol: ${{ matrix.protocol }}
+          fixtures-dir: ${{ matrix.fixtures_dir }}
           network: ${{ matrix.network }}
           rpc-url: ${{ matrix.rpc-url }}
 
@@ -126,11 +113,11 @@ jobs:
         if: always()
         run: |
           {
-            echo "### Protocol 29 ${{ matrix.network }}"
+            echo "### Protocol ${{ matrix.protocol }} ${{ matrix.network }}"
             echo ""
             echo "- Network passphrase: \`${{ matrix.passphrase }}\`"
             echo "- RPC endpoint: ${{ matrix.rpc-url }}"
-            echo "- Target protocol: ${{ env.TARGET_PROTOCOL }}"
+            echo "- Target protocol: ${TARGET_PROTOCOL}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       # An unreachable endpoint must fail safely with a clear diagnostic, not
@@ -140,7 +127,7 @@ jobs:
         if: failure()
         run: |
           {
-            echo "### ❌ Weekly live canary failed (Protocol 29 ${{ matrix.network }})"
+            echo "### ❌ Weekly live canary failed (Protocol ${{ matrix.protocol }} ${{ matrix.network }})"
             echo ""
             echo "- Endpoint: ${{ matrix.rpc-url }}"
             echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
@@ -149,4 +136,111 @@ jobs:
             echo "carries the engine's diagnostic; the workflow fails safely instead"
             echo "of reporting a compatibility result."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "::error title=Weekly live Protocol 29 canary failed::The weekly live canary failed against Protocol 29 ${{ matrix.network }} (${{ matrix.rpc-url }}). See the job summary for the engine's diagnostic."
+      # Record this leg's outcome in the summary so the tracking job (which
+      # treats a non-success `live-check` result as "at least one leg
+      # failed") and a human reading the run can both see which leg it was.
+      - name: Record this leg's outcome
+        if: always()
+        shell: bash
+        env:
+          LEG_NETWORK: ${{ matrix.network }}
+          LEG_OUTCOME: ${{ steps.run.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "${LEG_OUTCOME:-}" = "success" ]; then
+            mark="✅ passed"
+          else
+            mark="❌ failed (${LEG_OUTCOME:-no outcome})"
+          fi
+          {
+            echo ""
+            echo "- \`${LEG_NETWORK}\`: ${mark}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # One tracking issue for the weekly check (#420): a single failure that
+  # repeats every Monday should not open a new issue each week. This job
+  # runs once, after every matrix leg, and:
+  #   * on failure — creates the `weekly-live` issue if none is open, else
+  #     comments on the existing one;
+  #   * on a fully green run — comments on and closes the open issue.
+  # It is the only job with a write scope (`issues: write`); the workflow
+  # default stays read-only.
+  track-failure:
+    name: Track weekly live failure
+    needs: live-check
+    # This workflow can be manually dispatched from a non-main ref. Only the
+    # trusted main branch may use the issue-writing token.
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Open, update, or close the tracking issue
+        id: tracking
+        shell: bash
+        env:
+          RUN_OUTCOME: ${{ needs.live-check.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          label="${TRACKING_LABEL:?TRACKING_LABEL must name the tracking label}"
+
+          # This job intentionally has no checkout. Always give gh the target
+          # repository explicitly instead of relying on local git metadata.
+          labels=$(gh label list --repo "$GITHUB_REPOSITORY" --json name --jq '.[].name')
+          if ! grep -Fxq -- "$label" <<< "$labels"; then
+            # Create the documented label on first use with this job's
+            # existing issues:write permission. A second read handles a
+            # concurrent creation without hiding an API or permission error.
+            if ! gh label create "$label" \
+              --repo "$GITHUB_REPOSITORY" \
+              --color d73a4a \
+              --description "Single open tracking issue for scheduled weekly live failures"; then
+              labels=$(gh label list --repo "$GITHUB_REPOSITORY" --json name --jq '.[].name')
+              grep -Fxq -- "$label" <<< "$labels"
+            fi
+          fi
+
+          issue=$(gh issue list --repo "$GITHUB_REPOSITORY" --label "$label" --state open --limit 1 --json number --jq '.[0].number // empty')
+
+          if [ "${RUN_OUTCOME}" = "success" ]; then
+            if [ -n "$issue" ]; then
+              gh issue comment "$issue" --body "The weekly live canary is green again. Run: ${RUN_URL}$(printf '\n\n')Closing this tracking issue; it is reopened automatically should the canary fail again."
+              gh issue close "$issue" --reason completed
+              echo "Weekly live canary passed; closed tracking issue #${issue}"
+            else
+              echo "Weekly live canary passed and no tracking issue is open; nothing to do."
+            fi
+            exit 0
+          fi
+
+          # A run that did not succeed.
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body "The weekly live canary is still failing. Run: ${RUN_URL}"
+            echo "Commented on existing tracking issue #${issue}"
+          else
+            gh issue create \
+              --title "Weekly live canary is failing (Testnet/Futurenet)" \
+              --label "$label" \
+              --body "The scheduled weekly live canary has failed. Run: ${RUN_URL}"
+            echo "Created a new tracking issue for the weekly live failure"
+          fi
+
+      - name: Record the notification outcome
+        if: always()
+        shell: bash
+        env:
+          RUN_OUTCOME: ${{ needs.live-check.result }}
+          NOTIFICATION_OUTCOME: ${{ steps.tracking.outcome }}
+        run: |
+          {
+            echo ""
+            echo "### Weekly live tracking issue"
+            echo ""
+            echo "- Live-check result: \`${RUN_OUTCOME}\`"
+            echo "- Tracker step result: ${NOTIFICATION_OUTCOME:-not run}"
+          } >> "$GITHUB_STEP_SUMMARY"

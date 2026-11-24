@@ -23,10 +23,13 @@ export const DEFAULT_LOG_BLOCK_MAX_BYTES = 64 * 1024;
 export const TRUNCATION_NOTICE = "[... earlier output truncated ...]\n";
 
 /**
- * Matches ANSI escape codes: standard CSI sequences, OSC sequences, and simple escapes.
+ * Matches ANSI escape codes: CSI sequences, OSC sequences (including OSC 8
+ * hyperlinks, before the simple-escape class which also matches `]`), and
+ * simple escapes. The OSC body uses deterministic alternatives so matching is
+ * linear in the input length even when a sequence is unterminated.
  */
 const ANSI_PATTERN =
-  /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])|\x1B\].*?(?:\x07|\x1B\\)/g;
+  /\x1B(?:\[[0-?]*[ -/]*[@-~]|\](?:[^\x07\x1B]|\x1B(?!\\))*(?:\x07|\x1B\\)|\][\s\S]*|[@-Z\\-_])/g;
 
 /**
  * Control characters other than newline (`\n`, \u000A) and tab (`\t`, \u0009).

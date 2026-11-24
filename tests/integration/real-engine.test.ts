@@ -1,5 +1,6 @@
 import type * as actionsCore from "@actions/core";
 import { execFileSync } from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -66,6 +67,7 @@ const ENV_KEYS = [
   "INPUT_PROTOCOL",
   "INPUT_CONFIG",
   "INPUT_NETWORK",
+  "INPUT_NETWORK-PASSPHRASE",
   "INPUT_RPC-URL",
   "INPUT_FIXTURES-DIR",
   "INPUT_VERSION",
@@ -95,19 +97,23 @@ function engineVersion(binary: string): string {
   return match[1] as string;
 }
 
-function setUp(binary: string, version: string, inputs: Record<string, string>): Run {
+function setUp(binary: string, version: string, inputs: Record<string, string>, omitVersion = false): Run {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "canary-real-"));
   const cargoHome = path.join(workDir, "cargo-home");
-  fs.mkdirSync(path.join(cargoHome, "bin"), { recursive: true });
+  fs.mkdirSync(cargoHome, { recursive: true });
+
+  const runnerTemp = path.join(workDir, "runner-temp");
+  const binaryDir = path.join(runnerTemp, "stellar-canary-action", "bin");
+  fs.mkdirSync(binaryDir, { recursive: true });
   const exeName = process.platform === "win32" ? "stellar-canary.exe" : "stellar-canary";
-  const destPath = path.join(cargoHome, "bin", exeName);
+  const destPath = path.join(binaryDir, exeName);
   fs.copyFileSync(binary, destPath);
   if (process.platform !== "win32") {
     fs.chmodSync(destPath, 0o755);
   }
-
-  const runnerTemp = path.join(workDir, "runner-temp");
-  fs.mkdirSync(runnerTemp, { recursive: true });
+  const digest = crypto.createHash("sha256").update(fs.readFileSync(destPath)).digest("hex");
+  fs.writeFileSync(path.join(binaryDir, "stellar-canary.sha256"), `${digest}\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(binaryDir, "stellar-canary.origin"), "source-build\n", { mode: 0o600 });
   const emptyDir = path.join(workDir, "no-fixtures-here");
   fs.mkdirSync(emptyDir);
   const outputPath = path.join(workDir, "github-output");
@@ -115,11 +121,14 @@ function setUp(binary: string, version: string, inputs: Record<string, string>):
   fs.writeFileSync(SUMMARY_PATH, "");
 
   for (const key of ENV_KEYS) delete process.env[key];
+  process.env["INPUT_NETWORK-PASSPHRASE"] = "\u0001";
   process.env.CARGO_HOME = cargoHome;
   process.env.RUNNER_TEMP = runnerTemp;
   process.env.GITHUB_OUTPUT = outputPath;
   process.env.GITHUB_STEP_SUMMARY = SUMMARY_PATH;
-  process.env.INPUT_VERSION = version;
+  if (!omitVersion) {
+    process.env.INPUT_VERSION = version;
+  }
   process.env.INPUT_PROTOCOL = "28";
   process.env["INPUT_UPLOAD-REPORT"] = "false";
   process.env.INPUT_ANNOTATIONS = "true";
@@ -135,7 +144,9 @@ function setUp(binary: string, version: string, inputs: Record<string, string>):
   warningMock.mockClear();
   infoMock.mockClear();
 
-  return { workDir, outputPath, reportPath: () => path.join(runnerTemp, "stellar-canary-report.json"), emptyDir };
+  // #399: the report filename is unique per invocation, so the path is read
+  // back from the run's "report" output instead of being reconstructed.
+  return { workDir, outputPath, reportPath: () => readOutputs(outputPath).report as string, emptyDir };
 }
 
 function readOutputs(outputPath: string): Record<string, string> {
@@ -237,6 +248,16 @@ function suite(label: string, envName: string): void {
       expect(report.counts.total).toBe(1);
     });
 
+    if (version === "0.2.0") {
+      it("uses the v2 default engine version when version is omitted", async () => {
+        current = setUp(binary as string, version, {}, true);
+        await runAction();
+
+        expect(setFailedMock).not.toHaveBeenCalled();
+        expect(readOutputs(current.outputPath)["engine-version"]).toBe("0.2.0");
+      });
+    }
+
     it("allow-empty: true passes an empty run on this engine, whether or not it knows the flag", async () => {
       current = setUp(binary as string, version, { "fixtures-dir": "$EMPTY", "allow-empty": "true" });
       await runAction();
@@ -262,6 +283,23 @@ function suite(label: string, envName: string): void {
         expect(outputs.status).toBe("execution-failed");
         expect(outputs.passed).toBe("0");
         expect(fs.readFileSync(SUMMARY_PATH, "utf8")).toContain("no checks ran");
+      });
+
+      it("an unsupported protocol version fails the step as an execution failure (#630)", async () => {
+        // The engine exits 2 without a report when the requested protocol is
+        // not one it knows (99 is outside every released protocol range), so
+        // this must travel the execution-failure path rather than be mistaken
+        // for a compatibility verdict or a green run.
+        current = setUp(binary as string, version, { protocol: "99" });
+        await runAction();
+
+        expect(setFailedMock).toHaveBeenCalled();
+        const failureMessage = setFailedMock.mock.calls.map((call) => String(call[0])).join("\n");
+        expect(failureMessage).toContain("Protocol Canary could not be executed.");
+        expect(readOutputs(current.outputPath).status).toBe("execution-failed");
+        expect(fs.readFileSync(SUMMARY_PATH, "utf8")).toContain(
+          "Protocol Canary could not be executed.",
+        );
       });
 
       it("a misspelled config section is rejected and the engine's field name reaches the summary", async () => {

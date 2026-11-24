@@ -76,6 +76,100 @@ describe("buildReceipt (#360)", () => {
     expect(buildReceipt(noProtocol, TS).protocol).toBe("unknown");
   });
 
+  it("extracts engineCommit and packDigest from CF-01 documented nested paths (#581)", () => {
+    const documented = {
+      ...report({ toolVersion: "0.2.0" }),
+      run: { toolBuildCommit: "b2c3d4e5f60718293a4b5c6d7e8f901234567890" },
+      fixturePack: { digest: "sha256:abcdef1234567890..." },
+    } as unknown as CanaryReport;
+    const receipt = buildReceipt(documented, TS);
+    expect(receipt.engineCommit).toBe("b2c3d4e5f60718293a4b5c6d7e8f901234567890");
+    expect(receipt.packDigest).toBe("sha256:abcdef1234567890...");
+  });
+
+  it("prefers CF-01 nested paths over conflicting flat additive fields (#581)", () => {
+    const conflicting = {
+      ...report({ toolVersion: "0.2.0" }),
+      run: { toolBuildCommit: "nested-commit-sha" },
+      engineCommit: "flat-commit-sha",
+      fixturePack: { digest: "nested-pack-digest" },
+      packDigest: "flat-pack-digest",
+    } as unknown as CanaryReport;
+    const receipt = buildReceipt(conflicting, TS);
+    expect(receipt.engineCommit).toBe("nested-commit-sha");
+    expect(receipt.packDigest).toBe("nested-pack-digest");
+  });
+
+  it("falls back to flat additive fields when nested paths are absent (#581)", () => {
+    const flatOnly = {
+      ...report({ toolVersion: "0.2.0" }),
+      engineCommit: "flat-commit-sha",
+      packDigest: "flat-pack-digest",
+    } as unknown as CanaryReport;
+    const receipt = buildReceipt(flatOnly, TS);
+    expect(receipt.engineCommit).toBe("flat-commit-sha");
+    expect(receipt.packDigest).toBe("flat-pack-digest");
+  });
+
+  it("safely falls back to 'unknown' when nested provenance fields are missing or invalid (#581)", () => {
+    const invalid = {
+      ...report(),
+      run: { toolBuildCommit: 12345 },
+      fixturePack: { digest: ["not", "a", "string"] },
+    } as unknown as CanaryReport;
+    const receipt = buildReceipt(invalid, TS);
+    expect(receipt.engineCommit).toBe("unknown");
+    expect(receipt.packDigest).toBe("unknown");
+
+    const empty = {
+      ...report(),
+      run: { toolBuildCommit: "   " },
+      fixturePack: { digest: "" },
+    } as unknown as CanaryReport;
+    const emptyReceipt = buildReceipt(empty, TS);
+    expect(emptyReceipt.engineCommit).toBe("unknown");
+    expect(emptyReceipt.packDigest).toBe("unknown");
+  });
+
+  it("accepts valid positive integer protocol and observedProtocol values (#581)", () => {
+    const valid = report({
+      targetProtocol: 28,
+      network: { name: "testnet", observedProtocol: 29 },
+    });
+    const receipt = buildReceipt(valid, TS);
+    expect(receipt.protocol).toBe(28);
+    expect(receipt.observedProtocol).toBe(29);
+  });
+
+  it("resolves invalid protocol values (NaN, float, zero, negative, non-number) to 'unknown' (#581)", () => {
+    const invalidTarget = {
+      ...report(),
+      targetProtocol: NaN,
+      network: { name: "testnet", observedProtocol: 28.5 },
+    } as unknown as CanaryReport;
+    const receipt = buildReceipt(invalidTarget, TS);
+    expect(receipt.protocol).toBe("unknown");
+    expect(receipt.observedProtocol).toBe("unknown");
+
+    const nonPositive = {
+      ...report(),
+      targetProtocol: 0,
+      network: { name: "testnet", observedProtocol: -1 },
+    } as unknown as CanaryReport;
+    const nonPositiveReceipt = buildReceipt(nonPositive, TS);
+    expect(nonPositiveReceipt.protocol).toBe("unknown");
+    expect(nonPositiveReceipt.observedProtocol).toBe("unknown");
+
+    const nonNumber = {
+      ...report(),
+      targetProtocol: "28",
+      network: { name: "testnet", observedProtocol: true },
+    } as unknown as CanaryReport;
+    const nonNumberReceipt = buildReceipt(nonNumber, TS);
+    expect(nonNumberReceipt.protocol).toBe("unknown");
+    expect(nonNumberReceipt.observedProtocol).toBe("unknown");
+  });
+
   it("never throws on a bare report object — every field falls back to 'unknown'", () => {
     const receipt = buildReceipt({} as unknown as CanaryReport, TS);
     expect(receipt).toEqual({

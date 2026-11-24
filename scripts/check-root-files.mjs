@@ -24,6 +24,17 @@ export function parseAllowlist(content) {
 }
 
 /**
+ * Normalises a path for root-level comparison: backslashes become forward
+ * slashes and leading `./` segments are removed.
+ *
+ * @param {string} file
+ * @returns {string}
+ */
+function normalizeRootPath(file) {
+  return file.replace(/\\/g, "/").replace(/^(?:\.\/)+/, "");
+}
+
+/**
  * Pure comparison logic: finds any files that are not in the allowed list,
  * filtering only root files (files without a directory part / path separator).
  * Returns unexpected root file names sorted in stable lexicographical order.
@@ -37,8 +48,8 @@ export function findUnexpectedRootFiles(files, allowed) {
   const unexpected = [];
 
   for (const file of files) {
-    // Normalise any backslashes (e.g. Windows paths) to forward slashes
-    const normalized = file.replace(/\\/g, "/");
+    // Normalise separators and relative prefixes before classification
+    const normalized = normalizeRootPath(file);
     // Only check root files: entries with no directory part
     if (normalized.includes("/")) {
       continue;
@@ -66,7 +77,7 @@ export function findStaleAllowlistEntries(rootFiles, allowed) {
   const allowedList = allowed instanceof Set ? Array.from(allowed) : allowed;
   const rootSet = new Set(
     rootFiles
-      .map((f) => f.replace(/\\/g, "/"))
+      .map(normalizeRootPath)
       .filter((f) => !f.includes("/") && f.trim() !== ""),
   );
   const stale = [];

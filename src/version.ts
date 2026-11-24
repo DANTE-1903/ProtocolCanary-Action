@@ -1,6 +1,8 @@
 import * as core from "@actions/core";
-import * as https from "node:https";
 
+import { InvalidInputError } from "./errors";
+import { MAX_API_RESPONSE_BYTES } from "./http-response";
+import { GitHubRequestError, githubFetch } from "./github";
 import { resolveGithubToken } from "./inputs";
 
 /**
@@ -19,6 +21,116 @@ export const CANARY_REPO_URL = `https://github.com/${CANARY_REPO_OWNER}/${CANARY
 /** The API base for the Canary repository, shared by every REST call here. */
 export const CANARY_API_REPO_URL = `https://api.github.com/repos/${CANARY_REPO_OWNER}/${CANARY_REPO_NAME}`;
 
+/**
+ * Engine release compatibility policy (issue #374).
+ *
+ * Supported range: `>= 0.1.1` on the current `0.x` release line. `0.1.1` is
+ * the Action's default and is fully supported, so it must never warn. `0.1.0`
+ * sits just below the supported range but has no approved deprecation
+ * decision, so it is reported as unsupported *without* a deprecation warning;
+ * only releases strictly older than `0.1.0` warn. A future major release
+ * (`>= 1.0.0`) also warns: this Action has not been validated against it, and
+ * no deprecation decision covers it either.
+ */
+export const MIN_SUPPORTED_ENGINE_VERSION = "0.1.1";
+/** Legacy releases strictly older than this emit a deprecation warning. */
+export const DEPRECATED_BELOW_ENGINE_VERSION = "0.1.0";
+/** The newest engine release this Action is validated against. */
+export const LATEST_VALIDATED_ENGINE_VERSION = "0.1.1";
+
+/**
+ * The result of {@link assessEngineVersion}: how a requested Engine version
+ * relates to the range this Action supports. It is advisory only. It never
+ * selects, rewrites or rejects a version; the caller decides whether to emit
+ * the {@link EngineVersionCompatibility.warning} as an annotation.
+ */
+export interface EngineVersionCompatibility {
+  /** The version as assessed, trimmed. */
+  readonly version: string;
+  /**
+   * Whether the version is inside the supported range: major `0` and
+   * `>= 0.1.1` ({@link MIN_SUPPORTED_ENGINE_VERSION}). `0.1.0` is therefore
+   * `false` here yet carries no warning, and an unvalidated `>= 1.0.0` release
+   * is also `false`.
+   */
+  readonly supported: boolean;
+  /**
+   * A human-readable warning to emit as a GitHub annotation, or `undefined`
+   * when the version needs no warning (including the default `0.1.1`).
+   * Set only for a release older than `0.1.0` (deprecated) or for a
+   * `>= 1.0.0` release this Action has not validated. A `0.x` release newer
+   * than the latest validated one is neither flagged unsupported nor warned.
+   */
+  readonly warning: string | undefined;
+}
+
+interface ParsedEngineVersion {
+  readonly major: number;
+  readonly minor: number;
+  readonly patch: number;
+}
+
+const ENGINE_VERSION_PATTERN = /^(\d+)\.(\d+)\.(\d+)$/;
+
+/** Parses a strict `x.y.z` engine version. Unlike the `version` input's
+ * parser this does not accept a leading `v`: by the time a version reaches
+ * here it has already been normalised. Invalid strings throw
+ * {@link InvalidInputError} rather than being treated as "old" or "new". */
+function parseEngineVersion(version: string): ParsedEngineVersion {
+  const value = version.trim();
+  const match = ENGINE_VERSION_PATTERN.exec(value);
+  if (match === null) {
+    throw new InvalidInputError(
+      `Invalid engine version: ${JSON.stringify(version)}. Expected a semantic version, e.g. "${LATEST_VALIDATED_ENGINE_VERSION}".`,
+    );
+  }
+  return {
+    major: Number.parseInt(match[1] ?? "0", 10),
+    minor: Number.parseInt(match[2] ?? "0", 10),
+    patch: Number.parseInt(match[3] ?? "0", 10),
+  };
+}
+
+function compareEngineVersions(left: ParsedEngineVersion, right: ParsedEngineVersion): number {
+  if (left.major !== right.major) {
+    return left.major - right.major;
+  }
+  if (left.minor !== right.minor) {
+    return left.minor - right.minor;
+  }
+  return left.patch - right.patch;
+}
+
+/**
+ * Assesses a requested engine version against the supported release range
+ * and returns any warning the caller should emit. The default `0.1.1` is
+ * fully supported and produces no warning; a version strictly older than
+ * `0.1.0` warns as deprecated, as does an unvalidated future major release.
+ *
+ * Throws {@link InvalidInputError} for a value that is not `x.y.z`, so a
+ * mistyped version fails clearly instead of being misclassified by a
+ * best-effort comparison.
+ */
+export function assessEngineVersion(version: string): EngineVersionCompatibility {
+  const parsed = parseEngineVersion(version);
+  const supported =
+    parsed.major === 0 &&
+    compareEngineVersions(parsed, parseEngineVersion(MIN_SUPPORTED_ENGINE_VERSION)) >= 0;
+
+  let warning: string | undefined;
+  if (compareEngineVersions(parsed, parseEngineVersion(DEPRECATED_BELOW_ENGINE_VERSION)) < 0) {
+    warning =
+      `Protocol-Canary ${version.trim()} is older than ${DEPRECATED_BELOW_ENGINE_VERSION} and is no longer supported by this Action. ` +
+      `Upgrade the \`version\` input to ${LATEST_VALIDATED_ENGINE_VERSION} or newer.`;
+  } else if (parsed.major > 0) {
+    warning =
+      `Protocol-Canary ${version.trim()} is newer than the supported 0.x release line ` +
+      `(latest validated: ${LATEST_VALIDATED_ENGINE_VERSION}); compatibility with this engine release is not verified.`;
+  }
+
+  return { version: version.trim(), supported, warning };
+}
+
 /** GitHub's maximum page size for list endpoints such as `tags`. */
 const TAGS_PER_PAGE = 100;
 
@@ -29,10 +141,17 @@ const TAGS_PER_PAGE = 100;
  */
 const MAX_TAG_PAGES = 50;
 
+/**
+ * The outcome of {@link resolveVersion}: the requested Engine version, the
+ * upstream git tag derived from it, and the commit that tag pointed to when
+ * the lookup succeeded. This is the trust pin used when installing the Engine.
+ * Resolution never throws, so an unresolved commit is expressed as
+ * `commitSha: undefined` rather than as an error.
+ */
 export interface ResolvedVersion {
-  /** The bare semantic version, e.g. "0.1.0". */
+  /** The bare semantic version, as passed to {@link resolveVersion}, e.g. "0.1.0". */
   readonly version: string;
-  /** The git tag this version corresponds to, e.g. "v0.1.0". */
+  /** The git tag this version corresponds to: `v` plus the version, e.g. "v0.1.0". */
   readonly tag: string;
   /**
    * The commit the tag pointed to at resolution time, when it could be
@@ -45,10 +164,13 @@ export interface ResolvedVersion {
   readonly commitSha: string | undefined;
 }
 
+/** Options for {@link resolveVersion}. */
 export interface ResolveVersionOptions {
   /**
    * GitHub token used to authenticate the tag lookup. When omitted, the
-   * `GITHUB_TOKEN` environment variable is used if it is set. Passing a
+   * `GITHUB_TOKEN` environment variable is used if it is set. The token
+   * only affects the lookup's rate limit; it never changes which version or
+   * tag is resolved. Passing a
    * token raises the GitHub REST rate limit from 60 to 1,000+ requests per
    * hour per source IP, which matters because GitHub-hosted runners share
    * IP ranges across many concurrent jobs.
@@ -74,6 +196,38 @@ export async function resolveVersion(
       core.warning(
         `Could not find upstream tag ${tag}. This usually means the requested version ${version} is mistyped or not yet published; falling back to tag-only pinning.`,
       );
+      return undefined;
+    }
+
+    if (error instanceof GitHubRequestError && error.kind === "rate-limit") {
+      const resetMessage =
+        error.resetAt === undefined
+          ? "The reset time is unavailable."
+          : `The rate limit resets at ${error.resetAt.toISOString()}.`;
+      core.warning(
+        `GitHub API rate limit prevented resolving ${tag}. ${resetMessage} Falling back to tag-only pinning.`,
+      );
+      return undefined;
+    }
+
+    if (error instanceof GitHubRequestError && (error.kind === "network" || error.kind === "timeout")) {
+      const reason =
+        error.kind === "timeout"
+          ? "commit resolution failed because of a network timeout"
+          : "commit resolution failed because of a network error";
+      core.warning(
+        `GitHub API lookup for ${tag}: ${reason} (${message}). The Action is falling back to tag-only pinning.`,
+      );
+      return undefined;
+    }
+
+    if (error instanceof GitHubRequestError && error.kind === "server" && message.includes("failed after retries")) {
+      core.warning(`GitHub API lookup for ${tag} failed after retries; falling back to tag-only pinning: ${message}`);
+      return undefined;
+    }
+
+    if (error instanceof GitHubRequestError && error.kind === "server") {
+      core.warning(`GitHub API lookup for ${tag} failed; falling back to tag-only pinning: ${message}`);
       return undefined;
     }
 
@@ -118,55 +272,14 @@ function parseNextLink(header: string | string[] | undefined): string | undefine
   return undefined;
 }
 
-/** Fetches and parses a single page of the `tags` list endpoint. Rejects on
- * a non-200 response, malformed JSON, or an unexpected response shape. */
-function fetchTagsPage(url: string, token: string | undefined): Promise<TagsPage> {
-  return new Promise((resolve, reject) => {
-    let hostname: string;
-    try {
-      hostname = new URL(url).hostname;
-    } catch (err) {
-      reject(err instanceof Error ? err : new Error(String(err)));
-      return;
-    }
-
-    const headers: Record<string, string> = {
-      "User-Agent": "ProtocolCanary-Action",
-      Accept: "application/vnd.github+json",
-    };
-    if (token !== undefined && hostname === "api.github.com") {
-      headers.Authorization = `Bearer ${token}`;
-    }
-
-    const request = https.get(url, { headers, timeout: 10_000 }, (response) => {
-      if (response.statusCode !== 200) {
-        response.resume();
-        reject(new Error(`GitHub API returned status ${String(response.statusCode)} for ${url}`));
-        return;
-      }
-      let body = "";
-      response.setEncoding("utf8");
-      response.on("data", (chunk: string) => {
-        body += chunk;
-      });
-      response.on("end", () => {
-        try {
-          const parsed = JSON.parse(body) as unknown;
-          if (!Array.isArray(parsed)) {
-            reject(new Error("unexpected response shape from GitHub API"));
-            return;
-          }
-          resolve({ tags: parsed as GitHubTag[], next: parseNextLink(response.headers.link) });
-        } catch (error) {
-          reject(error instanceof Error ? error : new Error(String(error)));
-        }
-      });
-    });
-    request.on("timeout", () => {
-      request.destroy(new Error(`timed out resolving ${url}`));
-    });
-    request.on("error", reject);
-  });
+/** Fetches and parses a single bounded page of the `tags` list endpoint. */
+async function fetchTagsPage(url: string, token: string | undefined): Promise<TagsPage> {
+  const { body, headers } = await githubFetch(url, token, MAX_API_RESPONSE_BYTES);
+  const parsed = JSON.parse(body) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error("unexpected response shape from GitHub API");
+  }
+  return { tags: parsed as GitHubTag[], next: parseNextLink(headers.link) };
 }
 
 /**

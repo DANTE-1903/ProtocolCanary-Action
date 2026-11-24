@@ -77,6 +77,11 @@ function assertFreshMapSourcesAreRelative(mapText: string): void {
     expect(typeof source).toBe("string");
     expect(path.isAbsolute(source)).toBe(false);
     expect(/^[a-zA-Z]:[\\/]/.test(source)).toBe(false);
+    // Windows UNC network share (\\server\share\file.ts): the path is not
+    // absolute on POSIX, so path.isAbsolute alone cannot catch it.
+    expect(/^\\\\[^\\/]+[\\/]/.test(source)).toBe(false);
+    // URI schemes (file://, http://, ...): also not a filesystem-relative path.
+    expect(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(source)).toBe(false);
     expect(source === "/tmp" || source.startsWith("/tmp/")).toBe(false);
     expect(looksLikeHomeDirectory(source)).toBe(false);
   }
@@ -201,6 +206,30 @@ describe("bundle guard", () => {
         expect(String(error)).toContain("failed");
       } finally {
         fs.rmSync(brokenSrc, { recursive: true, force: true });
+      }
+    });
+
+    it("catches Windows UNC network share sources in a map (#629)", () => {
+      const map = JSON.stringify({
+        version: 3,
+        sources: ["src/inputs.ts", "\\\\server\\share\\src\\inputs.ts"],
+        mappings: "",
+      });
+      expect(() => {
+        assertFreshMapSourcesAreRelative(map);
+      }).toThrow();
+    });
+
+    it("catches URI scheme sources in a map (#629)", () => {
+      for (const source of [
+        "file:///home/user/src/inputs.ts",
+        "http://example.com/src/inputs.ts",
+        "webpack://project/src/inputs.ts",
+      ]) {
+        const map = JSON.stringify({ version: 3, sources: ["src/inputs.ts", source], mappings: "" });
+        expect(() => {
+          assertFreshMapSourcesAreRelative(map);
+        }, source).toThrow();
       }
     });
 

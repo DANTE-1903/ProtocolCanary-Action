@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { renderExecutionFailureMarkdown, renderSummaryMarkdown } from "../../src/summary";
-import type { CanarySkip } from "../../src/output";
+import type { CanaryReport, CanaryResult, CanarySkip } from "../../src/output";
+import { SUMMARY_BYTE_LIMIT, TRUNCATION_NOTICE, protocolMismatchMessage, renderExecutionFailureMarkdown, renderSummaryMarkdown } from "../../src/summary";
 import { report, result } from "./helpers";
 
 describe("renderSummaryMarkdown", () => {
@@ -208,6 +208,45 @@ describe("renderSummaryMarkdown", () => {
     expect(markdown).not.toContain("Network:");
   });
 
+  describe("observed protocol mismatch (#430)", () => {
+    it("renders a warning when the network reported a different protocol than the target", () => {
+      const markdown = renderSummaryMarkdown(
+        report({
+          targetProtocol: 28,
+          network: { name: "testnet", observedProtocol: 27 },
+          results: [result({ testId: "a", surface: "rpc", fixtureId: "a" })],
+        }),
+      );
+
+      expect(markdown).toContain("> ⚠️ Protocol mismatch:");
+      // Both numbers and the direction of the mismatch are stated, so a
+      // reader never has to guess which protocol the results describe.
+      expect(markdown).toContain("reported protocol 27");
+      expect(markdown).toContain("targets protocol 28");
+    });
+
+    it("does not warn when the observed protocol matches the target", () => {
+      const markdown = renderSummaryMarkdown(
+        report({ targetProtocol: 28, network: { name: "testnet", observedProtocol: 28 } }),
+      );
+
+      expect(markdown).toContain("Network: testnet — observed protocol 28");
+      expect(markdown).not.toContain("Protocol mismatch");
+    });
+
+    it("does not warn when the report has no observed protocol to compare", () => {
+      const markdown = renderSummaryMarkdown(
+        report({ targetProtocol: 28, network: { name: "testnet" } }),
+      );
+
+      expect(markdown).not.toContain("Protocol mismatch");
+    });
+
+    it("does not warn when the report has no network at all", () => {
+      expect(renderSummaryMarkdown(report({ targetProtocol: 28 }))).not.toContain("Protocol mismatch");
+    });
+  });
+
   it("never fabricates a result: an empty results array renders as a trivial pass with no surface rows", () => {
     const markdown = renderSummaryMarkdown(report({ status: "pass" }));
     expect(markdown).not.toContain("| XDR |");
@@ -331,6 +370,376 @@ describe("renderSummaryMarkdown", () => {
     expect(markdown).not.toContain("Replayed from cache");
     expect(markdown).toContain("1/1 applicable checks passed.");
   });
+
+  it("links the report artifact when an artifact ID is available", () => {
+    const originalRepo = process.env.GITHUB_REPOSITORY;
+    const originalRunId = process.env.GITHUB_RUN_ID;
+    const originalServerUrl = process.env.GITHUB_SERVER_URL;
+    try {
+      process.env.GITHUB_REPOSITORY = "StellarCanary/ProtocolCanary-Action";
+      process.env.GITHUB_RUN_ID = "123456";
+      delete process.env.GITHUB_SERVER_URL;
+
+      const markdown = renderSummaryMarkdown(
+        report({ status: "pass" }),
+        undefined,
+        { id: 9876, name: "stellar-protocol-canary-report" },
+      );
+
+      expect(markdown).toContain(
+        "Report artifact: [stellar-protocol-canary-report](https://github.com/StellarCanary/ProtocolCanary-Action/actions/runs/123456/artifacts/9876)",
+      );
+    } finally {
+      if (originalRepo !== undefined) process.env.GITHUB_REPOSITORY = originalRepo;
+      else delete process.env.GITHUB_REPOSITORY;
+      if (originalRunId !== undefined) process.env.GITHUB_RUN_ID = originalRunId;
+      else delete process.env.GITHUB_RUN_ID;
+      if (originalServerUrl !== undefined) process.env.GITHUB_SERVER_URL = originalServerUrl;
+      else delete process.env.GITHUB_SERVER_URL;
+    }
+  });
+
+  it("omits the artifact link when no artifact or no ID is provided", () => {
+    const markdown1 = renderSummaryMarkdown(report({ status: "pass" }));
+    expect(markdown1).not.toContain("Report artifact:");
+
+    const markdown2 = renderSummaryMarkdown(report({ status: "pass" }), undefined, { name: "stellar-report" });
+    expect(markdown2).not.toContain("Report artifact:");
+  });
+});
+
+/**
+ * #334: GitHub rejects an oversized job-summary append outright (HTTP 413),
+ * losing the whole summary rather than degrading it. These tests pin the
+ * bound, the priority order used to stay under it, and the fact that the
+ * result is deterministic.
+ */
+describe("renderSummaryMarkdown size limit (#334)", () => {
+  const utf8 = (text: string): number => Buffer.byteLength(text, "utf8");
+
+  /** A report whose single failing result's summary is `pad` ASCII
+   * characters. The rendered size moves one byte per added character, which
+   * is what lets the boundary tests below land on an exact byte count. */
+  function paddedFailure(pad: number, summaryChar = "x"): CanaryReport {
+    return report({
+      status: "fail",
+      counts: { total: 1, passed: 0, failed: 1, warnings: 0, errors: 0, skipped: 0 },
+      results: [
+        result({
+          testId: "p28-xdr-cap83-001",
+          surface: "xdr",
+          fixtureId: "p28-xdr-cap83-001",
+          status: "fail",
+          summary: summaryChar.repeat(pad),
+        }),
+      ],
+    });
+  }
+
+  /** Padding that makes the rendered Markdown exactly `targetBytes` UTF-8
+   * bytes long, derived from a one-character probe rather than hard-coded so
+   * it survives edits to the surrounding Markdown. */
+  function paddingForExactSize(targetBytes: number): number {
+    const probeBytes = utf8(renderSummaryMarkdown(paddedFailure(1)));
+    expect(probeBytes).toBeLessThan(SUMMARY_BYTE_LIMIT);
+    return 1 + (targetBytes - probeBytes);
+  }
+
+  /** Many large failing results, so the report's rendered size is dominated by
+   * detail the truncation has to cut. */
+  function manyFailures(approximateBytes: number): CanaryResult[] {
+    const perResult = 6144;
+    const count = Math.max(1, Math.ceil(approximateBytes / perResult));
+    return Array.from({ length: count }, (_unused, index) =>
+      result({
+        testId: `p28-xdr-cap${String(index)}-001`,
+        surface: "xdr",
+        fixtureId: `p28-xdr-cap${String(index)}-001`,
+        status: index % 7 === 0 ? "error" : "fail",
+        summary: `mismatch at byte ${String(index)} — ${"x".repeat(4096)}`,
+        details: `diff for check ${String(index)}:\n${"y".repeat(2048)}`,
+      }),
+    );
+  }
+
+  // ---- Normal (under the limit) ------------------------------------------------
+
+  it("leaves an ordinary report untouched and adds no truncation notice", () => {
+    const markdown = renderSummaryMarkdown(
+      report({
+        status: "fail",
+        counts: { total: 2, passed: 0, failed: 1, warnings: 1, errors: 0, skipped: 1 },
+        results: [
+          result({ testId: "a", surface: "xdr", fixtureId: "a", status: "fail", summary: "mismatch" }),
+          result({ testId: "b", surface: "rpc", fixtureId: "b", status: "warning", summary: "slow" }),
+        ],
+        skipped: [{ fixtureId: "p27-xdr-legacy", surface: "xdr", reason: "targets protocol 27" }],
+      }),
+    );
+
+    expect(markdown).not.toContain(TRUNCATION_NOTICE);
+    expect(markdown).toContain("#### Failures");
+    expect(markdown).toContain("#### Warnings");
+    expect(markdown).toContain("Skipped fixtures");
+    expect(utf8(markdown)).toBeLessThan(SUMMARY_BYTE_LIMIT);
+  });
+
+  // ---- Exact boundary ----------------------------------------------------------
+
+  it("publishes a report that lands exactly one byte under the limit untruncated", () => {
+    // The limit is inclusive of everything below it: a payload at exactly
+    // SUMMARY_BYTE_LIMIT - 1 must be published whole, with no notice, or the
+    // truncation would trigger a byte early.
+    const markdown = renderSummaryMarkdown(paddedFailure(paddingForExactSize(SUMMARY_BYTE_LIMIT - 1)));
+
+    expect(utf8(markdown)).toBe(SUMMARY_BYTE_LIMIT - 1);
+    expect(markdown).not.toContain(TRUNCATION_NOTICE);
+    expect(markdown).toContain("#### Failures");
+  });
+
+  it("truncates a report that lands exactly on the limit", () => {
+    // The mirror of the case above: one byte over, so the ceiling is not
+    // off-by-one in the permissive direction either.
+    const markdown = renderSummaryMarkdown(paddedFailure(paddingForExactSize(SUMMARY_BYTE_LIMIT)));
+
+    expect(utf8(markdown)).toBeLessThan(SUMMARY_BYTE_LIMIT);
+    expect(markdown).toContain(TRUNCATION_NOTICE);
+  });
+
+  // ---- Oversized ---------------------------------------------------------------
+
+  it("keeps the Provenance & Trust section when a 2 MiB report is truncated (#373, #334)", () => {
+    const results = manyFailures(2 * 1024 * 1024);
+    const markdown = renderSummaryMarkdown(
+      report({
+        status: "fail",
+        counts: { total: results.length, passed: 0, failed: results.length, warnings: 0, errors: 0, skipped: 0 },
+        results,
+      }),
+      { binarySha256: "a".repeat(64), engineVersion: "0.1.1" },
+    );
+
+    expect(utf8(markdown)).toBeLessThan(SUMMARY_BYTE_LIMIT);
+    expect(markdown).toContain("### Provenance & Trust");
+    expect(markdown).toContain(`sha256:${"a".repeat(64)}`);
+    expect(markdown).toContain(TRUNCATION_NOTICE);
+  });
+
+  for (const [label, approximateBytes] of [
+    ["2 MiB", 2 * 1024 * 1024],
+    ["5 MiB", 5 * 1024 * 1024],
+  ] as const) {
+    it(`bounds a ${label} report strictly under 1,000,000 bytes while keeping the verdict`, () => {
+      const results = manyFailures(approximateBytes);
+      const markdown = renderSummaryMarkdown(
+        report({
+          status: "fail",
+          counts: { total: results.length, passed: 0, failed: results.length, warnings: 0, errors: 0, skipped: 0 },
+          results,
+        }),
+      );
+
+      // The whole point of the issue: never send an oversized payload.
+      expect(utf8(markdown)).toBeLessThan(SUMMARY_BYTE_LIMIT);
+      expect(utf8(markdown)).toBeLessThanOrEqual(1_000_000);
+
+      // The totals and the verdict survive verbatim — a clipped summary still
+      // answers "did it pass, and how much ran".
+      expect(markdown).toContain("### Result");
+      expect(markdown).toContain("❌ **NOT READY**");
+      expect(markdown).toContain(`${String(0)}/${String(results.length)} applicable checks passed.`);
+
+      // As do the high-priority regressions, from the front of the report.
+      expect(markdown).toContain("#### Failures");
+      expect(markdown).toContain("- `p28-xdr-cap0-001` (xdr) — mismatch at byte 0 — ");
+
+      // And the truncation is announced, once, at the end.
+      expect(markdown.split(TRUNCATION_NOTICE)).toHaveLength(2);
+      expect(markdown.endsWith(TRUNCATION_NOTICE)).toBe(true);
+    });
+  }
+
+  it("counts UTF-8 bytes rather than characters", () => {
+    // "→" is three UTF-8 bytes. A summary built from it has far fewer
+    // characters than bytes, so a limit applied to `String.length` would let
+    // this payload through — and GitHub would reject it.
+    const markdown = renderSummaryMarkdown(
+      paddedFailure(Math.ceil((SUMMARY_BYTE_LIMIT + 50_000) / 3), "→"),
+    );
+
+    expect(markdown).toContain(TRUNCATION_NOTICE);
+    expect(utf8(markdown)).toBeLessThan(SUMMARY_BYTE_LIMIT);
+    // The character count alone is comfortably under the limit, which is the
+    // point: only a byte-based measure could have caught this.
+    expect([...markdown].length).toBeLessThan(SUMMARY_BYTE_LIMIT);
+  });
+
+  it("never cuts an entry in half: every rendered bullet is a verbatim source entry", () => {
+    const results = manyFailures(2 * 1024 * 1024);
+    const markdown = renderSummaryMarkdown(report({ status: "fail", results }));
+
+    const sourceBullets = new Set(
+      results.map((r) => `- \`${r.testId}\` (${r.surface}) — ${r.summary}`),
+    );
+    const renderedBullets = markdown.split("\n").filter((line) => line.startsWith("- `"));
+
+    expect(renderedBullets.length).toBeGreaterThan(0);
+    for (const bullet of renderedBullets) {
+      expect(sourceBullets.has(bullet)).toBe(true);
+    }
+  });
+
+  it("keeps a partially included section well formed, with balanced <details> tags", () => {
+    // Cheap failures plus an enormous skipped-fixture list: the skipped section
+    // is the one that gets clipped, so its collapsible wrapper must still be
+    // opened and closed exactly once each.
+    const markdown = renderSummaryMarkdown(
+      report({
+        status: "fail",
+        counts: { total: 1, passed: 0, failed: 1, warnings: 0, errors: 0, skipped: 4000 },
+        results: [
+          result({ testId: "a", surface: "xdr", fixtureId: "a", status: "fail", summary: "mismatch" }),
+        ],
+        skipped: Array.from({ length: 4000 }, (_unused, index) => ({
+          fixtureId: `p27-xdr-legacy-${String(index)}`,
+          surface: "xdr",
+          reason: `fixture targets protocol 27 — ${"z".repeat(512)}`,
+        })),
+      }),
+    );
+
+    expect(utf8(markdown)).toBeLessThan(SUMMARY_BYTE_LIMIT);
+    expect(markdown.split("<details>")).toHaveLength(2);
+    expect(markdown.split("</details>")).toHaveLength(2);
+    expect(markdown).toContain("<details><summary>Skipped fixtures</summary>");
+    // The whole list cannot have fit, so the section must say how much it lost.
+    expect(markdown).toMatch(/\d+ more skipped fixtures omitted/);
+  });
+
+  it("drops the least actionable section first, keeping failures and warnings", () => {
+    // Priority order: Failures > Warnings > skipped fixtures. With the budget
+    // consumed by a huge skipped list, the two sections a reader acts on must
+    // both survive, and only the skipped list is clipped.
+    const markdown = renderSummaryMarkdown(
+      report({
+        status: "fail",
+        counts: { total: 2, passed: 0, failed: 1, warnings: 1, errors: 0, skipped: 5000 },
+        results: [
+          result({ testId: "the-failure", surface: "xdr", fixtureId: "f", status: "fail", summary: "mismatch" }),
+          result({ testId: "a-warning", surface: "rpc", fixtureId: "w", status: "warning", summary: `slow — ${"w".repeat(1024)}` }),
+        ],
+        skipped: Array.from({ length: 5000 }, (_unused, index) => ({
+          fixtureId: `skipped-${String(index)}`,
+          surface: "xdr",
+          reason: "z".repeat(512),
+        })),
+      }),
+    );
+
+    expect(utf8(markdown)).toBeLessThan(SUMMARY_BYTE_LIMIT);
+    expect(markdown).toContain("#### Failures");
+    expect(markdown).toContain("- `the-failure` (xdr) — mismatch");
+    expect(markdown).toContain("#### Warnings");
+    expect(markdown).toContain("- `a-warning` (rpc) — slow — ");
+    // Only the skipped list, the lowest-priority section, was clipped.
+    expect(markdown).toMatch(/\d+ more skipped fixtures omitted/);
+    expect(markdown).not.toMatch(/\d+ more (failing checks|warnings) omitted/);
+    expect(markdown).toContain(TRUNCATION_NOTICE);
+  });
+
+  it("reports omitted warnings when failures leave no room for warning entries", () => {
+    // The mirror case: when the high-priority regressions fill the budget, the
+    // verbose sections must yield rather than push the payload over the
+    // ceiling. The failures are many and small so the leftover slack is under
+    // one entry, and the warning is far larger than that slack.
+    const failures = Array.from({ length: 5000 }, (_unused, index) =>
+      result({
+        testId: `fail-${String(index)}`,
+        surface: "xdr",
+        fixtureId: `fail-${String(index)}`,
+        status: "fail",
+        summary: `mismatch — ${"f".repeat(1000)}`,
+      }),
+    );
+    const markdown = renderSummaryMarkdown(
+      report({
+        status: "fail",
+        counts: { total: 5001, passed: 0, failed: 5000, warnings: 1, errors: 0, skipped: 0 },
+        results: [
+          ...failures,
+          result({
+            testId: "a-warning",
+            surface: "rpc",
+            fixtureId: "w",
+            status: "warning",
+            summary: `slow — ${"w".repeat(50_000)}`,
+          }),
+        ],
+      }),
+    );
+
+    expect(utf8(markdown)).toBeLessThan(SUMMARY_BYTE_LIMIT);
+    // The failures section kept what it could and accounted for the rest...
+    expect(markdown).toContain("#### Failures");
+    expect(markdown).toContain("- `fail-0` (xdr) — mismatch — ");
+    expect(markdown).toMatch(/\d+ more failing checks omitted/);
+    // ...and the warnings section has no room for its first entry, so it
+    // reports the omission without leaking a partial warning.
+    expect(markdown).toContain("#### Warnings");
+    expect(markdown).toMatch(/1 more warnings omitted/);
+    expect(markdown).not.toContain("- `a-warning`");
+    expect(markdown).toContain(TRUNCATION_NOTICE);
+  });
+
+  it("reports an omitted count when the first entry cannot fit rather than cutting it", () => {
+    // A single result whose summary exceeds the entire ceiling cannot be kept
+    // whole. Cutting it mid-string would produce exactly the malformed
+    // Markdown the issue asks to avoid, so the section is dropped rather than
+    // clipped; the totals and the verdict still stand.
+    const markdown = renderSummaryMarkdown(
+      report({
+        status: "fail",
+        counts: { total: 1, passed: 0, failed: 1, warnings: 0, errors: 0, skipped: 0 },
+        results: [
+          result({
+            testId: "the-failure",
+            surface: "xdr",
+            fixtureId: "f",
+            status: "fail",
+            summary: `mismatch — ${"f".repeat(SUMMARY_BYTE_LIMIT)}`,
+          }),
+        ],
+      }),
+    );
+
+    expect(utf8(markdown)).toBeLessThan(SUMMARY_BYTE_LIMIT);
+    // No fragment of the oversized entry leaks through, but its omission is
+    // still explicit even though it was the first entry in the section.
+    expect(markdown).not.toContain("ffff");
+    expect(markdown).toContain("#### Failures");
+    expect(markdown).toContain("1 more failing checks omitted");
+    // The verdict survives regardless.
+    expect(markdown).toContain("0/1 applicable checks passed.");
+    expect(markdown).toContain("❌ **NOT READY**");
+    expect(markdown).toContain(TRUNCATION_NOTICE);
+  });
+
+  it("is deterministic: the same report always renders to the same Markdown", () => {
+    const results = manyFailures(2 * 1024 * 1024);
+    const build = (): CanaryReport => report({ status: "fail", results });
+    expect(renderSummaryMarkdown(build())).toBe(renderSummaryMarkdown(build()));
+  });
+
+  it("still bounds the output when the preamble alone is oversized", () => {
+    // A pathological report (here, a multi-megabyte project name) can blow the
+    // ceiling before a single section is considered. The ceiling is the hard
+    // invariant — a 413 loses everything — so the payload must still fit.
+    const markdown = renderSummaryMarkdown(
+      report({ project: { name: "p".repeat(3 * 1024 * 1024), type: "soroban" } }),
+    );
+
+    expect(utf8(markdown)).toBeLessThan(SUMMARY_BYTE_LIMIT);
+  });
 });
 
 describe("renderExecutionFailureMarkdown", () => {
@@ -344,6 +753,34 @@ describe("renderExecutionFailureMarkdown", () => {
   it("shows a placeholder when there is no diagnostic output", () => {
     const markdown = renderExecutionFailureMarkdown("timed out", "");
     expect(markdown).toContain("(no diagnostic output)");
+  });
+
+  it("omits artifact link from execution failure summary when no artifact was uploaded", () => {
+    const markdown = renderExecutionFailureMarkdown("cargo install failed", "error: could not compile");
+    expect(markdown).not.toContain("Report artifact:");
+  });
+
+  it("links the report artifact in execution failure summary when an artifact with ID is provided", () => {
+    const originalRepo = process.env.GITHUB_REPOSITORY;
+    const originalRunId = process.env.GITHUB_RUN_ID;
+    try {
+      process.env.GITHUB_REPOSITORY = "StellarCanary/ProtocolCanary-Action";
+      process.env.GITHUB_RUN_ID = "123456";
+
+      const markdown = renderExecutionFailureMarkdown(
+        "cargo install failed",
+        "error: could not compile",
+        { id: 54321, name: "stellar-protocol-canary-report" },
+      );
+      expect(markdown).toContain(
+        "Report artifact: [stellar-protocol-canary-report](https://github.com/StellarCanary/ProtocolCanary-Action/actions/runs/123456/artifacts/54321)",
+      );
+    } finally {
+      if (originalRepo !== undefined) process.env.GITHUB_REPOSITORY = originalRepo;
+      else delete process.env.GITHUB_REPOSITORY;
+      if (originalRunId !== undefined) process.env.GITHUB_RUN_ID = originalRunId;
+      else delete process.env.GITHUB_RUN_ID;
+    }
   });
 
   // The diagnostic is raw text from an external process, so it may itself
@@ -384,7 +821,7 @@ describe("renderExecutionFailureMarkdown", () => {
     }
 
     // The verbatim diagnostic content survives inside the single block.
-    expect(markdown).toContain("```rust");
+    expect(markdown).toContain("\\`\\`\\`rust");
     expect(markdown).toContain("// quoted code from the panic message");
     expect(markdown).toContain("stack backtrace:");
   });
@@ -414,9 +851,50 @@ describe("renderExecutionFailureMarkdown", () => {
   });
 });
 
+describe("protocolMismatchMessage (#430)", () => {
+  it("returns a message naming both protocols when they differ", () => {
+    expect(
+      protocolMismatchMessage(
+        report({ targetProtocol: 28, network: { name: "testnet", observedProtocol: 27 } }),
+      ),
+    ).toBe("Protocol mismatch: the network reported protocol 27, but this run targets protocol 28.");
+  });
+
+  it("returns undefined when the protocols agree", () => {
+    expect(
+      protocolMismatchMessage(
+        report({ targetProtocol: 28, network: { name: "testnet", observedProtocol: 28 } }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined with no observed protocol, rather than treating it as a mismatch", () => {
+    expect(protocolMismatchMessage(report({ network: { name: "testnet" } }))).toBeUndefined();
+    expect(protocolMismatchMessage(report({}))).toBeUndefined();
+  });
+
+  it("ignores observed values that are not positive integers", () => {
+    for (const observedProtocol of [0, -1, 27.5, Number.NaN]) {
+      expect(
+        protocolMismatchMessage(report({ targetProtocol: 28, network: { name: "testnet", observedProtocol } })),
+      ).toBeUndefined();
+    }
+  });
+});
+
 describe("renderSummaryMarkdown — Provenance & Trust section (#373)", () => {
   const BINARY_SHA = "a".repeat(64);
   const PACK_DIGEST = "b".repeat(64);
+
+  it("renders a report persistence warning callout note when reportWriteError is present (#508)", () => {
+    const markdown = renderSummaryMarkdown(report({ status: "pass" }), {
+      reportWriteError: "EACCES",
+    });
+
+    expect(markdown).toContain("Report persistence warning");
+    expect(markdown).toContain("EACCES");
+    expect(markdown).toContain("report artifact was not uploaded");
+  });
 
   it("renders a provenance table with the binary SHA-256, pack digest, and engine version", () => {
     const markdown = renderSummaryMarkdown(report({ status: "pass" }), {
@@ -489,13 +967,42 @@ describe("renderSummaryMarkdown — reproduction command (#416)", () => {
     expect(markdown).toContain("--config '$WEIRD;value'");
   });
 
-  it("masks credentials in the --rpc-url argument", () => {
+  it("masks and shell-quotes credentials in the two-argument --rpc-url form", () => {
     const markdown = renderSummaryMarkdown(report({ status: "pass" }), {
       engineArgs: ["check", "--rpc-url", "https://user:pass@example.com/rpc?token=secret"],
     });
 
-    expect(markdown).toContain("--rpc-url https://[REDACTED]@example.com/rpc[REDACTED]");
+    expect(markdown).toContain("--rpc-url 'https://[REDACTED]@example.com/rpc[REDACTED]'");
     expect(markdown).not.toContain("user:pass");
+    expect(markdown).not.toContain("token=secret");
+  });
+
+  it("masks credentials in the single-argument --rpc-url=<url> form (#582)", () => {
+    const markdown = renderSummaryMarkdown(report({ status: "pass" }), {
+      engineArgs: ["check", "--rpc-url=https://user:pass@example.com/rpc?token=secret"],
+    });
+
+    expect(markdown).toContain("'--rpc-url=https://[REDACTED]@example.com/rpc[REDACTED]'");
+    expect(markdown).not.toContain("user:pass");
+    expect(markdown).not.toContain("token=secret");
+  });
+
+  it("shell-quotes a masked RPC URL whose query string contains ampersands (#582)", () => {
+    const markdown = renderSummaryMarkdown(report({ status: "pass" }), {
+      engineArgs: ["check", "--rpc-url", "https://example.com/rpc?key=public&token=secret&page=1"],
+    });
+
+    expect(markdown).toContain("--rpc-url 'https://example.com/rpc[REDACTED]'");
+    expect(markdown).not.toContain("token=secret");
+    expect(markdown).not.toContain("key=public");
+  });
+
+  it("quotes an ampersand that survives masking in a single-argument RPC URL (#582)", () => {
+    const markdown = renderSummaryMarkdown(report({ status: "pass" }), {
+      engineArgs: ["check", "--rpc-url=https://example.com/a&b?token=secret"],
+    });
+
+    expect(markdown).toContain("'--rpc-url=https://example.com/a&b[REDACTED]'");
     expect(markdown).not.toContain("token=secret");
   });
 

@@ -44,51 +44,120 @@ requirement.
 
 ## Installation integrity
 
-`Protocol-Canary` does not yet publish signed release binaries or
-checksums. This Action installs it from source with `cargo install --git`,
-which:
+Engine v0.2.0 publishes a raw Linux x64 binary and `SHA256SUMS`. The Action's
+prebuilt installer expects a platform archive; when no usable archive exists,
+it builds from source with `cargo install --git`. A published checksum
+establishes data integrity, not release signing or publisher identity.
+Installation uses the following safeguards:
 
 - always uses HTTPS to reach GitHub;
+- installs into an Action-owned directory under `RUNNER_TEMP` and does not
+  modify the runner's shared Cargo bin directory or `PATH`;
 - pins the exact requested version (the `version` input) — never `main`,
   never an unpinned "latest";
-- resolves that version's tag to the immutable commit it pointed to at run
+- for source builds, resolves that version's tag to the immutable commit it pointed to at run
   time via the GitHub REST API, and pins `cargo install --rev` to that
   commit — stronger than pinning the (mutable) tag alone;
 - falls back to pinning the tag directly, with a visible warning, only if
   that resolution fails (for example, a transient GitHub API error) —
   this Action never silently falls back to an unpinned or different
   version;
-- uses `--locked`, so the exact dependency versions in `Protocol-Canary`'s
+- for source builds, uses `--locked`, so the exact dependency versions in `Protocol-Canary`'s
   own committed `Cargo.lock` are used rather than whatever the latest
   compatible versions happen to be at build time;
 - never executes a downloaded script — the toolchain performing the build
   is `cargo`, already present on the runner, not something this Action
   fetches and runs;
-- verifies the installed or cached binary against the checksum manifest
-  published with the release, when one exists, and refuses to use a binary
-  that does not match (see [Checksum verification](#checksum-verification)).
+- records the binary's origin (source build or prebuilt release asset) and
+  verifies integrity accordingly (see [Checksum verification](#checksum-verification));
+- verifies a downloaded release asset against the checksum manifest published
+  with the release, and refuses to use a binary that does not match (see
+  [Checksum verification](#checksum-verification));
+- extracts prebuilt archives into a fresh temporary directory, validating that
+  exactly one regular `stellar-canary` binary exists and rejecting symlinks,
+  path escapes, or duplicate binaries before atomic placement into the tool cache.
 
 ### Checksum verification
 
-When the requested `Protocol-Canary` release publishes a checksum manifest
-(for example `SHA256SUMS`) as a release asset, this Action downloads it,
-hashes the binary it is about to run, and compares the two. A mismatch
-throws an `InstallationFailed` error and the binary is never executed.
+- **Source builds:** The Action installs `Protocol-Canary`
+  with `cargo install --git --locked` pinned to an immutable commit when
+  available (falling back to the tag). The integrity anchor for source
+  builds is that commit/tag pin; release checksums do **not** apply to
+  binaries compiled from source. No checksum manifest is downloaded for
+  source builds, and this is logged at `info` level. The optional
+  `strict-integrity: true` policy rejects source builds, including cached
+  source builds, because release checksums cannot verify them.
+- **Downloaded release binaries:** If a binary is obtained as a
+  downloaded release asset, this Action downloads the checksum manifest
+  published alongside that release, hashes the binary, and compares it
+  against the **exact per-platform asset name** in the manifest. For example,
+  the published v0.2.0 Linux x64 name is `stellar-canary-linux-x86_64`.
+  Generic binary names, path-prefixed filenames, and other platforms' entries
+  cannot substitute for the requested name. A mismatch
+  throws an `InstallationFailedError` and the binary is never executed. A
+  missing manifest, missing exact entry, or unverifiable lookup is a failure
+  for release assets in both strict and default modes (fail closed).
+  Release archive downloads reject every 3xx response while D-11 is blocked.
+  The Engine installer logs the rejection and may compile the pinned source
+  under default integrity; strict-integrity rejects that source build.
+  Fixture-pack downloads fail closed on a redirect.
+- **What is not verified:** A hash of a different build (e.g. the
+  maintainers' prebuilt binary) is not compared with a locally compiled
+  source build. The previous behavior that could compare unrelated
+  artifacts has been corrected. `httpsGetText` and release archive downloads
+  do not follow redirects while D-11 remains blocked. The candidate redirect
+  policy is documented separately and is not wired into runtime code.
 
-`Protocol-Canary` does not publish checksums yet, so the lookup normally
-finds nothing and this step is a no-op that logs a debug line. That
-fallback to commit/tag pinning is deliberate and is the documented,
-unchanged behavior: the checksum step only ever *adds* a guarantee when a
-manifest exists, and its absence never weakens the existing pinning.
-A compiled-from-a-pinned-commit build is still a weaker integrity story
-than a checksum published by the artifact's own maintainers, so making
-checksum-verified installs the primary path remains the goal.
+### Cached binary integrity
+
+A binary restored from the Actions cache is bound to the SHA-256 digest
+recorded in its `stellar-canary.sha256` sidecar at install time. If the
+sidecar is missing, malformed, or does not match the restored binary, the
+entry is treated as a cache miss: the untrusted files are deleted and the
+Action installs a fresh, verified binary. A cached executable is never run
+on trust alone.
 
 The full integrity model — trust boundaries, the optional
 `strict-integrity` fail-closed policy, the D-07 (checksums are data
 integrity, not author authenticity) and D-11 (redirect policy unresolved,
 so no redirect is followed) decision boundaries, and the threat model — is
 documented in [`docs/integrity-model.md`](docs/integrity-model.md).
+
+## Release provenance
+
+Release tags publish `dist/index.js` and its source map with a build
+provenance attestation. To verify a downloaded release artifact:
+
+```sh
+gh attestation verify dist/index.js --repo StellarCanary/ProtocolCanary-Action
+```
+
+The attestation proves the bundle was built by this repository's release
+workflow from the tagged commit. Note that consumers who pin the Action by
+tag still execute the JavaScript bundle, so verify the artifact if your
+threat model requires provenance beyond the pinned tag and commit.
+
+## Pre-installed engine discovery (issue #342)
+
+The Action may discover an existing `stellar-canary` executable in
+`CARGO_HOME/bin`, the Actions tool cache (`@actions/tool-cache`), or
+`PATH`. A candidate is never used on existence alone: it must be a regular,
+non-symlinked file in a trusted, non-world-writable directory; its SHA-256
+must match the checksum published with the requested release; and its
+`stellar-canary version` output must exactly match the requested version.
+Candidates that fail any of these checks are warned about and skipped, and
+installation falls back to the verified prebuilt release asset or a source
+build pinned to the requested commit/tag.
+
+Engine v0.2.0 publishes `SHA256SUMS` for `stellar-canary-linux-x86_64`.
+Pre-installed discovery still requires a successful lookup and an exact
+asset-name match before it executes a candidate. A redirected manifest
+lookup is not followed and cannot satisfy that check. Enabling
+pre-installed discovery as a default, trusted
+fast path requires maintainer security review and approval; until that
+approval is recorded, the implementation remains subject to that review
+and does not bypass the existing checksum, release-metadata, archive, or
+provenance checks for downloaded binaries.
 
 ## Subprocess isolation
 
@@ -105,6 +174,71 @@ Pull request source code is treated as untrusted. This Action:
 - decodes child process streams statefully as UTF-8, bounding stdout to
   64 MiB (terminating the process if exceeded) and stderr capture to 1 MiB
   (retaining the tail with a notice).
+
+### Child process environment
+
+Compiling a dependency tree executes arbitrary code from every crate in it —
+build scripts and procedural macros included. `cargo` (both the `--version`
+probe and `cargo install`) and the Protocol Canary engine therefore **do not
+inherit the job environment**: each is started with an explicit allow-list
+built from the runner environment (`src/child-env.ts`), and nothing else. The
+Action process itself keeps its environment because it needs `INPUT_*`,
+`GITHUB_*`, and `ACTIONS_*`.
+
+**Default allow-list** (exact names; case-insensitive matching only on
+Windows):
+
+- Process and locale: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`,
+  `TEMP`, `TMP`, `LANG`, `LANGUAGE`, `TZ`, `TERM`, `NO_COLOR`, `CI`.
+- Windows system: `SystemRoot`, `SYSTEMROOT`, `windir`, `ComSpec`, `PATHEXT`,
+  `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `ProgramData`, `ProgramFiles`,
+  `ProgramFiles(x86)`, `ProgramW6432`, `NUMBER_OF_PROCESSORS`,
+  `PROCESSOR_ARCHITECTURE`, `OS`.
+- Rust and Cargo: `CARGO_HOME`, `RUSTUP_HOME`, `RUSTUP_TOOLCHAIN`,
+  `RUSTFLAGS`, `RUSTC`, `RUSTC_WRAPPER`, `RUSTC_WORKSPACE_WRAPPER`,
+  `RUSTDOCFLAGS`, `RUST_BACKTRACE`, `RUST_LOG`.
+- Native build toolchain: `CC`, `CXX`, `AR`, `LD`, `CFLAGS`, `CXXFLAGS`,
+  `LDFLAGS`, `CPPFLAGS`, `PKG_CONFIG`, `PKG_CONFIG_PATH`,
+  `PKG_CONFIG_SYSROOT_DIR`, plus the MSVC toolchain's `INCLUDE`, `LIB`,
+  `LIBPATH`, `VCINSTALLDIR`, `VCToolsInstallDir`, `VSINSTALLDIR`,
+  `WindowsSdkDir`, `WindowsSDKVersion`, `UCRTVersion`, `Platform`.
+- Network and certificates: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`,
+  `NO_PROXY` (and their lower-case forms), `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+  `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`.
+- Prefixes: `LC_*`, `RUSTUP_*`, `CARGO_*`, `CMAKE_*`.
+
+**Deny rules** — never passed, even when a prefix above matches:
+
+- `GITHUB_*`, `ACTIONS_*`, `INPUT_*`, `RUNNER_*`;
+- `CARGO_REGISTRY_TOKEN`, `CARGO_REGISTRIES_*` (registry/mirror credentials);
+- `GIT_ASKPASS`, `SSH_AUTH_SOCK` (credential agents);
+- `AWS_*`, `AZURE_*`, `GCP_*`, `GOOGLE_*`, `NPM_*`, `NODE_AUTH_TOKEN`;
+- any name containing `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL`,
+  `PRIVATE_KEY`, `API_KEY`, `ACCESS_KEY`, or `SESSION` (case-insensitive
+  substring). This is the backstop that stops an allow-listed prefix such as
+  `CARGO_*` from forwarding a credential nobody enumerated.
+
+**Opt-in passthrough (`engine-env-passthrough`)** — a comma- or
+newline-separated list of exact names forwarded in addition to the list
+above:
+
+- names only: each must match `^[A-Za-z_][A-Za-z0-9_]*$` — no wildcards, no
+  values;
+- at most 16 names; duplicates are rejected;
+- a denied name is rejected with an input error that names the variable and
+  never prints a value. The passthrough cannot restore `GITHUB_TOKEN`, the
+  runtime tokens, cloud credentials, Cargo registry tokens, or anything else
+  denied by default;
+- each forwarded name is logged once at info level (names only, never
+  values), so the job log records exactly what left the Action.
+
+**Trade-offs.** The list is a maintained compromise, not a proof: a missing
+variable can break an unusual toolchain, which is why the opt-in exists. The
+Action cannot make a malicious dependency safe — it only deprives it of the
+job's secrets, tokens, and credentials; that code still runs with the
+allow-listed environment and the runner's filesystem and network access. A
+credential that a build genuinely needs cannot be supplied through this
+input; use a different mechanism and accept the risk.
 
 ## External diagnostics and output safety
 
@@ -143,17 +277,19 @@ The token is used strictly as a bearer credential for read-only requests to the
 GitHub REST API at `api.github.com` (for version resolution and checksum
 manifest lookup) to raise API rate limits. It is:
 
-- strictly restricted to `api.github.com` — the `Authorization` header is never
-  sent to arbitrary hosts or to release asset download URLs (such as `github.com`);
-- never forwarded to child processes or echoed to logs, outputs, or summaries;
+- strictly restricted to a clean absolute HTTPS URL on exact `api.github.com`;
+  URLs with userinfo, encoded authorities, non-default ports, malformed or
+  non-HTTPS schemes are rejected before a request, and the `Authorization`
+  header is never sent to other hosts or release asset URLs (such as `github.com`);
+- never forwarded to child processes (the children receive only the
+  allow-listed environment above, in which every `GITHUB_*` and `ACTIONS_*`
+  name is denied) or echoed to logs, outputs, or summaries;
 - operable with minimal read-only permissions (`contents: read`), making it safe
   for pull requests from forks without granting write access.
 
-The Action does not require any secret for its core function. If a
-workflow's `rpc-url` happens to embed a credential in its query string
-(not a pattern this project recommends), that is echoed only insofar as
-Canary itself might log it — the same as any other CLI argument a workflow
-author chooses to pass.
+The Action registers non-empty userinfo credentials, query parameter values, and fragments using `core.setSecret()`. The complete URL is also registered when sensitive components exist. GitHub Actions runner masking is best effort: very short values may not be masked because of runner masking limitations. Values may still be exposed through transformations or outputs outside the runner's masking coverage. Engine output is not guaranteed to be fully sanitized by this mechanism. Users should continue using GitHub Actions secrets for RPC credentials. Users should avoid intentionally printing sensitive values.
+
+Credential-bearing RPC URLs are now protected: the Action registers non-empty userinfo credentials (`user:password@host`), query parameter values, and URL fragments using `core.setSecret()`. The complete credential-bearing URL is also registered when any sensitive component is present. GitHub Actions runner masking is best effort — very short values may not be masked due to runner limitations. Values may still be exposed through transformations or outputs outside the runner's masking coverage. Engine output is not guaranteed to be fully sanitized by this mechanism. Users should continue using GitHub Actions secrets for RPC credentials. Users should avoid intentionally printing sensitive values.
 
 ## Supported versions
 
@@ -194,3 +330,8 @@ release depend on the severity and complexity of the issue. If you have
 not received an acknowledgement within 5 business days, please follow up
 on your existing private report thread rather than opening a public issue,
 so the report is not lost or unintentionally disclosed.
+
+
+### Experimental pull request comment security
+
+The opt-in `pr-comment` feature requests `pull-requests: write` only when consumers explicitly configure it. Do not use `pull_request_target` or run untrusted fork code with a write token. Fork PRs are skipped. The comment is based on the existing escaped job-summary renderer, bounded to 60,000 characters, and attempts to update only bot-authored comments with the matching workflow/job marker. API permission errors are warnings. This implementation is provisional until a maintainer-approved permission model is recorded in the engine contract decisions.

@@ -83,6 +83,21 @@ action.yml
       expect(findUnexpectedRootFiles(files, allowed)).toEqual(["stray.log"]);
     });
 
+    it("treats ./ and .\\ prefixed root files as root files", () => {
+      const files = ["./README.md", ".\\LICENSE", "./stray.txt", ".\\stray.log", "././README.md"];
+      const allowed = new Set(["README.md", "LICENSE"]);
+      expect(findUnexpectedRootFiles(files, allowed)).toEqual(["stray.log", "stray.txt"]);
+    });
+
+    it("recognises prefixed allowed root files as allowed", () => {
+      expect(findUnexpectedRootFiles(["./README.md", ".\\LICENSE"], ["README.md", "LICENSE"])).toEqual([]);
+    });
+
+    it("keeps nested paths with relative prefixes out of the root file check", () => {
+      const files = ["docs/guide.md", "./docs/guide.md", ".\\docs\\guide.md", "./stray.txt"];
+      expect(findUnexpectedRootFiles(files, new Set())).toEqual(["stray.txt"]);
+    });
+
     it("handles empty file list and empty allow list", () => {
       expect(findUnexpectedRootFiles([], new Set())).toEqual([]);
       expect(findUnexpectedRootFiles(["stray.md"], new Set())).toEqual(["stray.md"]);
@@ -106,6 +121,16 @@ action.yml
       const rootFiles = ["README.md", "package.json", "src/foo.ts"];
       const allowed = ["README.md", "package.json"];
       expect(findStaleAllowlistEntries(rootFiles, allowed)).toEqual([]);
+    });
+
+    it("matches allow-list entries against ./ and .\\ prefixed root files", () => {
+      const rootFiles = ["./README.md", ".\\package.json", "./docs/guide.md"];
+      expect(findStaleAllowlistEntries(rootFiles, ["README.md", "package.json"])).toEqual([]);
+    });
+
+    it("still reports stale entries when prefixed root files are present", () => {
+      const rootFiles = ["./README.md", ".\\docs\\guide.md"];
+      expect(findStaleAllowlistEntries(rootFiles, ["README.md", "OLD_FILE.md"])).toEqual(["OLD_FILE.md"]);
     });
   });
 });

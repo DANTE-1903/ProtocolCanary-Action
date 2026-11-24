@@ -11,7 +11,7 @@ import {
 interface ExpectationEntry {
   engineRef: string;
   packRef: string;
-  expectedStatus: "fail" | "error" | "execution-failed";
+  expectedStatus: "fail" | "error" | "execution-failed" | "warning";
   failureSignature: string;
   runUrl: string;
   dateAdded: string;
@@ -19,12 +19,32 @@ interface ExpectationEntry {
 }
 
 const BASE_FACTS = {
+  schemaVersion: 1 as const,
+  cellId: "cell-001-abcd1234",
   engineRef: "v0.1.1",
   packRef: "protocol-28",
+  executionMode: "offline-xdr" as const,
+  engineCommit: "a".repeat(40),
+  fixturesCommit: "b".repeat(40),
   actionCommit: "abc123",
   runUrl: "https://github.com/StellarCanary/ProtocolCanary-Action/actions/runs/123",
+  engineCheckoutOutcome: "success" as const,
+  fixturesCheckoutOutcome: "success" as const,
   buildOutcome: "success" as const,
+  checkOutcome: "completed" as const,
+  checkExitCode: 0,
+  actionStatus: "pass",
+  cliFailureKind: null,
+  passed: 1,
+  failures: 0,
+  warnings: 0,
+  errors: 0,
+  replayedCount: 0,
+  total: 1,
+  firstDiagnostic: "",
   ranNoChecks: false,
+  evidenceError: null,
+  evidenceFiles: ["report.json", "stderr.txt", "exit-code.txt"],
 };
 
 /** @type {ExpectationEntry[]} */
@@ -32,13 +52,22 @@ const EMPTY_EXPECTATIONS: ExpectationEntry[] = [];
 
 describe("classifyCell", () => {
   describe("infrastructure failures", () => {
+    it("rejects a cell that does not identify the offline XDR execution mode", () => {
+      const result = classifyCell(
+        { ...BASE_FACTS, executionMode: "live" as never },
+        EMPTY_EXPECTATIONS,
+      );
+      expect(result.classification).toBe("infrastructure");
+      expect(result.reason).toContain("unsupported schema");
+    });
+
     it("classifies build failure as infrastructure", () => {
       const result = classifyCell(
         { ...BASE_FACTS, buildOutcome: "failure" },
         EMPTY_EXPECTATIONS,
       );
       expect(result.classification).toBe("infrastructure");
-      expect(result.reason).toContain("Build/checkout failure");
+      expect(result.reason).toContain("Build failure");
     });
 
     it("classifies build timeout as infrastructure", () => {
@@ -108,6 +137,26 @@ describe("classifyCell", () => {
       expect(result.classification).toBe("unexpected-pass");
       expect(result.reason).toContain("Expected fail");
     });
+
+    it("classifies pass as unexpected-pass when expectation says it should warn", () => {
+      const expectations = [
+        {
+          engineRef: "v0.1.1",
+          packRef: "protocol-28",
+          expectedStatus: "warning",
+          failureSignature: "Deprecated API",
+          runUrl: "https://example.com/expected-warning",
+          dateAdded: "2026-01-01",
+          reason: "Deprecated API is used by this fixture pack",
+        },
+      ];
+      const result = classifyCell(
+        { ...BASE_FACTS, actionStatus: "pass", total: 5, passed: 5 },
+        expectations,
+      );
+      expect(result.classification).toBe("unexpected-pass");
+      expect(result.reason).toContain("Expected warning");
+    });
   });
 
   describe("expected-incompatible cells", () => {
@@ -135,6 +184,110 @@ describe("classifyCell", () => {
       expect(result.reason).toContain("CAP-83 not implemented");
     });
 
+    it("matches expectation for warning status with the same diagnostic signature", () => {
+      const expectations = [
+        {
+          engineRef: "v0.1.1",
+          packRef: "protocol-28",
+          expectedStatus: "warning",
+          failureSignature: "Deprecated API",
+          runUrl: "https://example.com/expected-warning",
+          dateAdded: "2026-01-01",
+          reason: "Deprecated API is used by this fixture pack",
+        },
+      ];
+      const result = classifyCell(
+        {
+          ...BASE_FACTS,
+          actionStatus: "warning",
+          warnings: 1,
+          passed: 0,
+          firstDiagnostic: "Deprecated API: CAP-46 field is obsolete",
+        },
+        expectations,
+      );
+      expect(result.classification).toBe("expected-incompatible");
+      expect(result.reason).toContain("Deprecated API is used by this fixture pack");
+      expect(result.evidence).toContain("https://example.com/expected-warning");
+    });
+
+    it("does not match a warning expectation when the diagnostic signature differs", () => {
+      const expectations = [
+        {
+          engineRef: "v0.1.1",
+          packRef: "protocol-28",
+          expectedStatus: "warning",
+          failureSignature: "Deprecated API",
+          runUrl: "https://example.com/expected-warning",
+          dateAdded: "2026-01-01",
+          reason: "Deprecated API is used by this fixture pack",
+        },
+      ];
+      const result = classifyCell(
+        {
+          ...BASE_FACTS,
+          actionStatus: "warning",
+          warnings: 1,
+          passed: 0,
+          firstDiagnostic: "Unexpected network fallback",
+        },
+        expectations,
+      );
+      expect(result.classification).toBe("unexpected-failure");
+      expect(result.reason).toContain("Unexpected network fallback");
+    });
+
+    it("does not match a warning expectation for a different engine or pack", () => {
+      const expectations = [
+        {
+          engineRef: "v0.1.1",
+          packRef: "protocol-28",
+          expectedStatus: "warning",
+          failureSignature: "Deprecated API",
+          runUrl: "https://example.com/expected-warning",
+          dateAdded: "2026-01-01",
+          reason: "Deprecated API is used by this fixture pack",
+        },
+      ];
+      const result = classifyCell(
+        {
+          ...BASE_FACTS,
+          engineRef: "v0.2.0",
+          actionStatus: "warning",
+          warnings: 1,
+          passed: 0,
+          firstDiagnostic: "Deprecated API",
+        },
+        expectations,
+      );
+      expect(result.classification).toBe("unexpected-failure");
+    });
+
+    it("does not match a failure expectation against a warning status", () => {
+      const expectations = [
+        {
+          engineRef: "v0.1.1",
+          packRef: "protocol-28",
+          expectedStatus: "fail",
+          failureSignature: "Deprecated API",
+          runUrl: "https://example.com/expected-fail",
+          dateAdded: "2026-01-01",
+          reason: "Known failure",
+        },
+      ];
+      const result = classifyCell(
+        {
+          ...BASE_FACTS,
+          actionStatus: "warning",
+          warnings: 1,
+          passed: 0,
+          firstDiagnostic: "Deprecated API",
+        },
+        expectations,
+      );
+      expect(result.classification).toBe("unexpected-failure");
+    });
+
     it("matches expectation for execution-failed status", () => {
       const expectations = [
         {
@@ -153,6 +306,8 @@ describe("classifyCell", () => {
           engineRef: "v0.2.0",
           packRef: "main",
           actionStatus: "execution-failed",
+          failures: 1,
+          passed: 0,
           firstDiagnostic: "cargo install failed: linker error",
         },
         expectations,
@@ -244,12 +399,35 @@ describe("classifyCell", () => {
   });
 
   describe("boundary cases", () => {
-    it("handles missing actionStatus as unknown -> unexpected-failure", () => {
+    it("treats a missing actionStatus as malformed execution evidence", () => {
       const result = classifyCell(
         { ...BASE_FACTS, actionStatus: undefined },
         EMPTY_EXPECTATIONS,
       );
-      expect(result.classification).toBe("unexpected-failure");
+      expect(result.classification).toBe("infrastructure");
+    });
+
+    it("treats checkout, build and timeout failures as infrastructure before matching expectations", () => {
+      const expectation = [{
+        engineRef: "v0.1.1",
+        packRef: "protocol-28",
+        expectedStatus: "execution-failed" as const,
+        failureSignature: "cargo install failed",
+        runUrl: "https://example.com/expected-failure",
+        dateAdded: "2026-01-01",
+        reason: "Expected failure fixture",
+      }];
+      expect(classifyCell({ ...BASE_FACTS, engineCheckoutOutcome: "failure" }, expectation).classification)
+        .toBe("infrastructure");
+      expect(classifyCell({ ...BASE_FACTS, buildOutcome: "failure" }, expectation).classification)
+        .toBe("infrastructure");
+      expect(classifyCell({ ...BASE_FACTS, checkOutcome: "timeout" }, expectation).classification)
+        .toBe("infrastructure");
+    });
+
+    it("treats missing or malformed report evidence as infrastructure", () => {
+      expect(classifyCell({ ...BASE_FACTS, evidenceError: "Malformed report JSON" }, EMPTY_EXPECTATIONS).classification)
+        .toBe("infrastructure");
     });
 
     it("includes run URL in evidence for all classifications", () => {
@@ -267,10 +445,10 @@ describe("classifyCell", () => {
 });
 
 describe("shouldFailJob", () => {
-  it("returns true only for unexpected-failure and unexpected-pass", () => {
+  it("fails infrastructure, unexpected-failure and unexpected-pass results", () => {
     expect(shouldFailJob("supported")).toBe(false);
     expect(shouldFailJob("expected-incompatible")).toBe(false);
-    expect(shouldFailJob("infrastructure")).toBe(false);
+    expect(shouldFailJob("infrastructure")).toBe(true);
     expect(shouldFailJob("skipped")).toBe(false);
     expect(shouldFailJob("unexpected-failure")).toBe(true);
     expect(shouldFailJob("unexpected-pass")).toBe(true);
@@ -312,6 +490,21 @@ describe("formatCellRow", () => {
     expect(formatCellRow({ ...base, classification: "skipped" })).toContain("⏭️");
     expect(formatCellRow({ ...base, classification: "unexpected-failure" })).toContain("❌");
     expect(formatCellRow({ ...base, classification: "unexpected-pass" })).toContain("🔄");
+  });
+
+  it("escapes untrusted pipes and line breaks in table cells", () => {
+    const row = formatCellRow({
+      engineRef: "main|other",
+      packRef: "protocol-28",
+      actionCommit: "abc123",
+      runUrl: "https://example.com/run",
+      classification: "unexpected-failure",
+      reason: "first line\n<script>second | line</script>",
+      evidence: "https://example.com/run",
+    });
+    expect(row).toContain("main\\|other");
+    expect(row).toContain("first line<br>&lt;script&gt;second \\| line&lt;/script&gt;");
+    expect(row).not.toContain("<script>");
   });
 });
 

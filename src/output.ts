@@ -121,18 +121,55 @@ function validateCounts(
   return validated;
 }
 
+/**
+ * Check surface of a result or skip: `xdr`, `rpc` or `soroban`. Matches the
+ * `surface` enum in `tests/fixtures/report-v1.schema.json`. `parseReport`
+ * rejects any other value in `results[]`; `CanarySkip.surface` is looser.
+ */
 export type Surface = "xdr" | "rpc" | "soroban";
+/**
+ * Per-result status. The pinned schema allows `skipped` for `results[].status`
+ * but reserves it: entries in `results[]` ran, and skipped fixtures belong in
+ * the top-level `skipped` array. `parseReport` accepts all five values.
+ */
 export type ResultStatus = "pass" | "warning" | "fail" | "error" | "skipped";
+/**
+ * Overall report outcome (`status` in the schema). `error` means at least one
+ * result errored and outranks the pass/warning/fail policy decision. There is
+ * no `skipped` value. `parseReport` rejects any other string. The Action's own
+ * `execution-failed` output is not a report status.
+ */
 export type OverallStatus = "pass" | "warning" | "fail" | "error";
 
+/**
+ * One entry of `results[]`: a fixture that actually ran (never a skipped one).
+ * Required by the schema and checked by `parseReport`: `testId`, `protocol`,
+ * `surface`, `status`, `summary`, `durationMs`. Optional: `details`, `source`
+ * (absent means not recorded, never null). `fixtureId` is nullable. `replayed`
+ * and `cached` are Action-side tolerated aliases, not in the pinned schema.
+ * Results are unique per `(surface, fixtureId ?? testId)`. `summary` and
+ * `details` are arbitrary text and must never be rendered as markup.
+ */
 export interface CanaryResult {
+  /** Required. Fixture test identifier. */
   readonly testId: string;
+  /** Required. The fixture's own declared protocol (equals `targetProtocol`). */
   readonly protocol: number;
+  /** Required. One of `xdr`, `rpc`, `soroban`. */
   readonly surface: Surface;
+  /** Required. Outcome of this fixture. */
   readonly status: ResultStatus;
+  /** Required. One-line human-readable outcome; arbitrary text. */
   readonly summary: string;
+  /** Optional. Multi-line explanation; absent, not null, when there is none. */
   readonly details?: string;
+  /** Required. Wall-clock time in milliseconds; not stable, ignore in comparisons. */
   readonly durationMs: number;
+  /**
+   * Nullable. Schema: currently equal to `testId`, may be null when not
+   * recorded. `parseReport` accepts a string or null but rejects an absent
+   * key, which the schema itself does not require.
+   */
   readonly fixtureId: string | null;
   /**
    * Where this result came from, per CF-01 §6/§4 reserved field:
@@ -153,12 +190,20 @@ export interface CanaryResult {
   readonly cached?: boolean;
 }
 
+/**
+ * One entry of the top-level `skipped` array: a fixture the planner decided
+ * not to run. Required: `fixtureId`, `surface`, `reason`. Optional: `code`.
+ * The whole array is omitted, not empty, when nothing was skipped.
+ */
 export interface CanarySkip {
+  /** Required. Identifier of the skipped fixture. */
   readonly fixtureId: string;
+  /** Required. Schema enum is `xdr`, `rpc`, `soroban`; the parser accepts any string. */
   readonly surface: string;
+  /** Required. Free-form prose; arbitrary text, never render as markup. */
   readonly reason: string;
   /**
-   * Stable machine-readable skip reason (CF-01): one of
+   * Optional. Stable machine-readable skip reason (CF-01): one of
    * `UNSUPPORTED_PROTOCOL`, `SURFACE_DISABLED`, `MISSING_CAPABILITY`,
    * `OFFLINE`, `NETWORK_MISMATCH`, or `UNKNOWN`. Absent in reports written
    * before the field existed; an unrecognized value is read as `UNKNOWN` by
@@ -167,6 +212,12 @@ export interface CanarySkip {
   readonly code?: string;
 }
 
+/**
+ * Fixture-pack identity. Not part of the pinned report-v1 schema: the schema
+ * sets no `additionalProperties` restriction, so this reserved additive
+ * object passes through `parseReport` untouched and is not validated there.
+ * Every field is optional; absent means not recorded.
+ */
 export interface CanaryFixturePack {
   /** Canonical `sha256:<64 lowercase hex>` digest of the fixture pack. */
   readonly digest?: string;
@@ -186,6 +237,15 @@ export interface CanaryFixturePack {
   readonly packDigest?: string;
 }
 
+/**
+ * Aggregate counts, `counts` in the schema. Convenience values re-derivable
+ * from `results[].status`. `total` excludes skipped fixtures. The schema
+ * requires all six numbers, but `parseReport` tolerates older engines: a
+ * missing or malformed counts object is derived from `results`/`skipped`, a
+ * missing `skipped` number is filled from the skipped array, and a complete
+ * object that disagrees with `results` is rejected. After parsing, `skipped`
+ * is always present.
+ */
 export interface CanaryCounts {
   readonly total: number;
   readonly passed: number;
@@ -195,20 +255,55 @@ export interface CanaryCounts {
   readonly skipped?: number;
 }
 
+/**
+ * The parsed `stellar-canary check --format json` report, as returned by
+ * `parseReport` (schemaVersion 1, `tests/fixtures/report-v1.schema.json`).
+ * The schema requires `schemaVersion`, `toolVersion`, `targetProtocol`,
+ * `project`, `status`, `counts` and `results`. After parsing, `skipped` is
+ * `undefined` when absent (treat as empty) and `git` is always an object,
+ * with null fields standing in for an engine that did not record it. Unknown
+ * properties are preserved at runtime although they are not modeled here.
+ * `network` and `run` are optional in the schema, and the Action models only
+ * part of `network` (not `error`) and none of `run` or `verbose`.
+ */
 export interface CanaryReport {
+  /** Required. Always `1`; any other version is rejected by `parseReport`. */
   readonly schemaVersion: number;
+  /** Required, non-empty. The CLI semver; informational, not for feature detection. */
   readonly toolVersion: string;
+  /** Required. Positive integer protocol this run checked. */
   readonly targetProtocol: number;
+  /**
+   * Required. `name` is the project directory name (arbitrary text). `type`
+   * is a string here; the schema limits it to `soroban`, `rpc-consumer`,
+   * `stellar-sdk`, `generic-stellar` or `unknown`, but the parser does not.
+   */
   readonly project: { readonly name: string; readonly type: string };
+  /**
+   * Optional. Live network identity, present only when a live surface ran;
+   * absence marks an offline run. `observedProtocol` is absent when the live
+   * call failed. The schema `network.error` string is validated but not
+   * kept in this type.
+   */
   readonly network?: { readonly name: string; readonly observedProtocol?: number };
+  /** Required. Overall outcome of the run. */
   readonly status: OverallStatus;
+  /** Required in the schema; derived by the parser when an older engine omits it. */
   readonly counts: CanaryCounts;
+  /** Required. Fixtures that ran; an empty array is valid but is not compatibility evidence. */
   readonly results: readonly CanaryResult[];
+  /** Optional. Planner skips; omitted entirely, not empty, when there are none. */
   readonly skipped?: readonly CanarySkip[];
   /** Reserved additive CF-02 pack identity; absent for local/unrecorded packs. */
   readonly fixturePack?: CanaryFixturePack;
   /** Legacy/top-level alias for the pack digest used by early receipt drafts. */
   readonly packDigest?: string;
+  /**
+   * Build context of the checkout under test. The schema makes `git` optional
+   * (absent in older reports, meaning not recorded) with nullable fields.
+   * `parseReport` always supplies it, defaulting to all-null, so absent and
+   * null are indistinguishable here.
+   */
   readonly git: {
     readonly commit: string | null;
     readonly branch: string | null;
@@ -353,12 +448,25 @@ export function parseReport(stdout: string): CanaryReport {
         `A newer Protocol-Canary release may require a newer ProtocolCanary-Action version.`,
     );
   }
-  if (
-    typeof report.status !== "string" ||
-    !["pass", "warning", "fail", "error"].includes(report.status) ||
-    !Array.isArray(report.results)
-  ) {
-    throw new InvalidReportError("Canary's JSON output does not match the documented report shape.");
+  // Split into field-specific errors (rather than one combined shape check)
+  // so a rejected report always names the offending field — the differential
+  // test for #447 asserts that every schema-required-field/type violation is
+  // rejected with an error that identifies the field it violates.
+  if (typeof report.status !== "string") {
+    throw new InvalidReportError(
+      'Canary\'s JSON output is missing or has an invalid "status" field: expected a string.',
+    );
+  }
+  if (!["pass", "warning", "fail", "error"].includes(report.status)) {
+    throw new InvalidReportError(
+      `Canary's JSON output has an invalid "status" field: expected one of ` +
+        `"pass", "warning", "fail", "error" (got ${JSON.stringify(report.status)}).`,
+    );
+  }
+  if (!Array.isArray(report.results)) {
+    throw new InvalidReportError(
+      'Canary\'s JSON output is missing or has an invalid "results" field: expected an array.',
+    );
   }
 
   // Validate required fields that the renderer and annotation code depend on
@@ -537,6 +645,68 @@ export function resolvePackIdentity(
 }
 
 /**
+ * How completely the fixture set was exercised, exposed as the Action's
+ * `coverage-state` output so a downstream job can gate a release promotion on
+ * coverage rather than on the pass/fail verdict alone:
+ *
+ * - `full`: every discovered fixture ran and nothing was skipped;
+ * - `partial`: at least one fixture ran, but some were skipped;
+ * - `none`: no fixture ran at all (an empty run, or a report too malformed to
+ *   say otherwise).
+ *
+ * `none` is deliberately the conservative default: a run that cannot prove it
+ * executed the fixtures must not claim full coverage.
+ */
+export type CoverageState = "full" | "partial" | "none";
+
+/**
+ * Classifies a report's fixture coverage (#333).
+ *
+ * "Discovered" fixtures are the ones the engine reported on at all — the
+ * executed `results[]` plus the `skipped[]` fixtures it deliberately did not
+ * run. Classification is therefore:
+ *
+ * - `none` when nothing executed, which also covers a report that carries no
+ *   usable coverage information at all (an absent/!array `results`, an absent
+ *   `counts`): such a report must never be reported as `full`;
+ * - `full` when something executed and no fixture was skipped anywhere;
+ * - `partial` when something executed *and* something was skipped.
+ *
+ * Skips are detected from three independent signals, because which one is
+ * populated depends on the engine release: a `skipped[]` entry, a result whose
+ * own status is `skipped`, and `counts.skipped` (which older releases report
+ * without sending the `skipped[]` array at all). Any non-zero signal is enough.
+ *
+ * Tolerant by construction — every field access is guarded — so a partially
+ * shaped report yields a state instead of throwing inside the reporting path.
+ */
+export function classifyCoverage(report: CanaryReport): CoverageState {
+  // Read defensively rather than trusting the declared types: this runs in the
+  // reporting path on a report that may have come from an unexpected engine
+  // build, so a missing or oddly shaped field must classify as `none` rather
+  // than throw and take the run's reporting down with it.
+  const raw = report as CanaryReport | undefined;
+  const results: readonly unknown[] = Array.isArray(raw?.results) ? raw.results : [];
+
+  const isSkipped = (entry: unknown): boolean =>
+    typeof entry === "object" && entry !== null && (entry as Partial<CanaryResult>).status === "skipped";
+
+  // An entry the Action cannot read as a result is treated as an executed
+  // one: it came back inside `results[]`, which the engine only populates for
+  // checks it ran.
+  const executed = results.filter((entry) => !isSkipped(entry)).length;
+  if (executed === 0) {
+    return "none";
+  }
+
+  const skippedResults = results.filter(isSkipped).length;
+  const skippedEntries = Array.isArray(raw?.skipped) ? (raw.skipped ?? []).length : 0;
+  const reportedSkipped = isCountsShape(raw?.counts) ? (raw.counts?.skipped ?? 0) : 0;
+
+  return Math.max(skippedResults, skippedEntries, reportedSkipped) > 0 ? "partial" : "full";
+}
+
+/**
  * Whether a result was replayed from the engine's result cache rather than
  * executed in this run (CF-01 §6). `source: "cache"` is the contract's
  * spelling; the boolean `replayed`/`cached` attributes are honored too.
@@ -580,21 +750,27 @@ interface ExitCodeInfo {
  * Canary's actual pass/fail decision.
  */
 const EXIT_CODES: Readonly<Record<number, ExitCodeInfo>> = {
-  0: { category: "pass", description: "Compatibility checks passed." },
+  0: { category: "pass", description: "Every applicable check passed." },
   1: {
     category: "compatibility_failure",
-    description: "Test failures detected: a compatibility assertion failed.",
+    description: "At least one fixture's compatibility assertion failed — a real incompatibility was found.",
   },
   2: {
     category: "configuration_error",
-    description: "Regression gate triggered or Canary configuration is invalid.",
+    description: "The invocation was unusable or no check applied, so no checks ran.",
   },
   3: {
     category: "execution_error",
-    description: "Unexpected runtime crash: execution or RPC communication failed.",
+    description: "At least one check could not complete — it was executed but hit an XDR, RPC, or Soroban execution problem.",
   },
-  4: { category: "invalid_fixture", description: "One or more fixtures are invalid." },
-  5: { category: "internal_error", description: "Canary encountered an internal error." },
+  4: {
+    category: "invalid_fixture",
+    description: "A fixture file failed to load or validate, so the run never started.",
+  },
+  5: {
+    category: "internal_error",
+    description: "An internal error unrelated to configuration, fixtures, or the three compatibility surfaces.",
+  },
 };
 
 /**

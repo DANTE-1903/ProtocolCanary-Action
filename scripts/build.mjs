@@ -9,17 +9,8 @@
 // handles ESM-into-CJS interop correctly.
 import { build } from "esbuild";
 
-await build({
-  entryPoints: ["src/main.ts"],
-  outfile: "dist/index.js",
-  bundle: true,
-  platform: "node",
-  target: "node20",
-  format: "cjs",
-  minify: true,
-  sourcemap: true,
-  legalComments: "linked",
-  preserveSymlinks: true,
-});
+import { BUILD_OPTIONS } from "./build-options.mjs";
+
+await build(BUILD_OPTIONS);
 
 console.log("Built dist/index.js");

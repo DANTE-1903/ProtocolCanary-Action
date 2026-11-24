@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CanaryReport } from "../../src/output";
 import { buildReceipt, serializeReceipt } from "../../src/receipt";
-import { runCli, verifyReceipt } from "../../scripts/verify-receipt";
+import { HELP_TEXT, runCli, verifyReceipt } from "../../scripts/verify-receipt";
 import { report as reportFixture } from "./helpers";
 
 /**
@@ -216,15 +216,50 @@ describe("runCli (#363) — real files and exit codes", () => {
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining("usage:"));
   });
 
+  it("prints usage documentation to stdout and exits 0 on --help (#585)", () => {
+    const exitCode = runCli(["--help"]);
+    expect(exitCode).toBe(0);
+    expect(console.log).toHaveBeenCalledWith(HELP_TEXT);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Usage:"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("verify-receipt <receipt.json> <report.json>"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Arguments:"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("receipt.json"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Execution Receipt to verify"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("report.json"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Canary JSON report to compare against"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Exit codes:"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("0               Receipt matches the report"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("1               Divergence detected"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("2               Input is unreadable or invalid, or required arguments are missing"));
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("prints usage documentation to stdout and exits 0 on -h (#585)", () => {
+    const exitCode = runCli(["-h"]);
+    expect(exitCode).toBe(0);
+    expect(console.log).toHaveBeenCalledWith(HELP_TEXT);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Usage:"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Arguments:"));
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Exit codes:"));
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it("prioritizes help flag before positional argument validation (#585)", () => {
+    expect(runCli(["--help", "extra"])).toBe(0);
+    expect(runCli(["-h", "only-one.json"])).toBe(0);
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
   it("end-to-end through the real producer: build → serialize → files → verify exits 0", () => {
     const docReport = documentedReport();
-    // The producer reads flat keys, so a documented-shape report yields
-    // 'unknown' provenance fields; verification must still pass without
-    // false positives (spec: 'unknown' never mismatches).
+    // The producer reads documented CF-01 nested paths (run.toolBuildCommit
+    // and fixturePack.digest), so a documented-shape report populates the
+    // receipt's provenance fields directly.
     const receipt = buildReceipt(docReport as unknown as CanaryReport, TS);
     const receiptPath = write("receipt.json", serializeReceipt(receipt));
     const reportPath = write("report.json", JSON.stringify(docReport, null, 2));
-    expect(receipt.engineCommit).toBe("unknown");
+    expect(receipt.engineCommit).toBe(COMMIT);
+    expect(receipt.packDigest).toBe(DIGEST);
     expect(runCli([receiptPath, reportPath])).toBe(0);
   });
 });

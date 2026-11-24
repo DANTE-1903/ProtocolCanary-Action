@@ -6,11 +6,11 @@ integrity guarantees it does and does not make, and the two open decisions
 (D-07 and D-11) that bound those guarantees. It complements
 [`SECURITY.md`](../SECURITY.md), which states the policy; this document
 explains the model behind it and where each claim lives in the
-implementation. The fork-PR *threat* model authored alongside it
-(permissions scoping and boundary conformance, issue #369) will be
-maintained by the sibling document `docs/security-model.md` (currently on
-open PR #461) — these two documents cover different axes and are meant to
-be read together.
+implementation. Its sibling, [`docs/security-model.md`](security-model.md),
+covers the fork-PR *threat* model (permissions scoping and boundary
+conformance, issue #369). The two documents cover different axes and are
+meant to be read together: this one owns the integrity of the binary the
+Action runs, the other owns what untrusted pull requests can reach.
 
 ## Trust boundaries
 
@@ -21,7 +21,7 @@ trusted context to a more trusted one. This Action has five:
 |---|---|---|---|
 | 1 | Workflow author → Action | Action inputs (`action.yml`) | `src/inputs.ts` validation: strict boolean literals, integer formats, `https://`-only `rpc-url` (localhost exempt), `config` must be an existing regular file resolved before forwarding |
 | 2 | GitHub REST API → Action | Release tag/commit resolution, checksum manifests | `src/canary.ts` + `src/version.ts`: HTTPS-only requests, no redirect following, non-200 is an error, malformed JSON/manifests are "unverifiable", never "verified" |
-| 3 | Source build → executed binary | `cargo install --git --locked --rev <commit>` output | Commit pinning (never a mutable tag, never `main`), published-checksum verification when a manifest exists, strict-integrity fail-closed policy (see below) |
+| 3 | Installed binary → executed binary | Source build or downloaded release binary, with recorded origin | Source builds use the resolved commit/tag pin and an install-time digest; downloaded release binaries require the exact asset checksum. Strict mode rejects source builds (see below). |
 | 4 | Engine output → reporting layer | Canary stdout JSON, stderr | `src/output.ts` schema-validated parsing; `src/summary.ts` fences external diagnostics against markdown injection; `src/redact.ts` neutralises workflow-command sequences |
 | 5 | Action → runner OS | Every process launch | `src/runner.ts`: argument arrays only, never a shell string; bounded timeout; SIGTERM/SIGKILL escalation |
 
@@ -36,17 +36,27 @@ for the least-privilege consumption pattern).
 
 - The engine version is pinned to an immutable commit resolved from the
   requested release tag wherever possible.
-- A checksum *mismatch* against a published manifest always aborts
-  (`InstallationFailed`), before the binary runs and before anything is
-  saved to the shared Actions cache.
-- The published-checksum lookup never follows a redirect: a 3xx (to any
-  domain, allowlisted or not — including `evil.com`-style spoof targets)
-  is a failed lookup, and no second request is issued to the `Location`
-  value. Plain `http://` manifest targets can never complete: all lookups
-  go through Node's TLS client.
-- No Authorization header can leak to a third party, because redirects —
-  the only path by which the request identity could change target — are
-  never followed.
+- Source-built binaries are never compared with published release
+  checksums. The Action performs no manifest lookup for that origin and
+  explains the commit/tag guarantee at info level. Source builds saved to
+  the Actions cache retain an install-time digest; restoration checks that
+  digest and restores the source-build origin before reuse.
+- Downloaded release binaries require an exact match between the requested
+  platform asset name and the checksum manifest entry. Engine v0.2.0
+  publishes `stellar-canary-linux-x86_64`; neither a generic binary name nor
+  an entry for another platform can substitute for it. Path-prefixed names
+  are not reduced to their basename. A missing exact entry, unavailable
+  manifest, or digest mismatch aborts (`InstallationFailed`) before the
+  downloaded binary runs, in both default and strict modes.
+- The release-asset downloader makes one HTTPS request to a `github.com`
+  release URL. Any 3xx is rejected before `Location` is parsed or requested.
+  It removes partial files, and the Engine installer logs its permitted
+  source-build fallback. Fixture-pack downloads fail closed.
+- Asset requests carry no Authorization header. Runtime request helpers add a
+  bearer token only to a clean absolute HTTPS URL for exact `api.github.com`.
+  They reject userinfo, encoded authorities, non-default ports, HTTP, and
+  malformed URLs before opening a request. Release assets and every other
+  host receive no token.
 
 **What is deliberately *not* guaranteed (decision D-07, deferred):**
 checksums and commit pins are data-integrity mechanisms — they detect
@@ -58,39 +68,39 @@ minisign identities, no Sigstore bundles). A checksum manifest published
 Any digest shown in the job summary's "Provenance & Trust" section carries
 this caveat inline; it must never be quoted as authorship proof.
 
-**Decision D-11 (unresolved, blocked):** the download-redirect policy —
-which redirect hosts would be allowlisted, up to how many hops, and with
-what header stripping — remains **blocked until verified against real
-release hosts** (GitHub's asset CDN rotates `objects.githubusercontent.com`
-endpoints, and a wrong allowlist is a security feature that silently
-becomes a bypass). Until D-11 is resolved, the implemented policy is
-maximally strict: **redirects are not followed at all** (0 hops), which is
-the boundary `tests/unit/integrity.test.ts` pins. No code in this
-repository currently claims an allowlist; if you read one anywhere, it is
-stale.
+**Decision D-11 (unresolved, blocked):** runtime redirect following remains
+disabled. The pure candidate policy in `src/download-policy.ts` allows only
+the observed `github.com` → `release-assets.githubusercontent.com` edge,
+validates both URLs, and caps a proposed chain at three hops. It is not
+imported by runtime code and does not approve redirects. The Action observed
+the source's 302 and destination hostname on 2026-11-02 without following
+the redirect; the Engine contract records an earlier 200 response from the
+destination. Maintainers must review this evidence and explicitly approve
+the exact rule before runtime integration. Any later CDN hostname needs new
+evidence and approval.
 
 ## The strict-integrity fail-closed policy (issue #372)
 
-The optional `strict-integrity` input (default `false`, so existing
-pipelines keep today's behaviour) changes verification from "abort when
-integrity is *disproven*" to "abort unless integrity is *proven*". With
-`strict-integrity: true` the run fails closed — an `InstallationFailed`
-abort before the binary executes — when:
+The optional `strict-integrity` input (default `false`) rejects source-built
+binaries, including restored source builds. Those binaries have no
+applicable published release checksum, so strict mode must fail closed with an
+`InstallationFailed` error before executing them. It does not try to use a
+checksum from a different build to establish integrity.
 
-1. no published checksum manifest exists for the resolved release (or the
-   lookup could not complete over an authenticated HTTPS channel, which
-   includes a redirected or unencrypted response);
-2. a manifest exists but has no entry for this platform/architecture;
-3. the manifest's digest does not match the binary (already fatal in both
-   modes).
+Downloaded release binaries must pass published checksum verification in
+both modes. A missing manifest, a missing exact platform asset entry, a
+failed lookup, or a mismatched digest aborts before the downloaded binary
+executes. If no usable prebuilt candidate exists before download, the Action
+may fall back to a source build; strict mode rejects that source build.
 
 | Condition | `strict-integrity: false` (default) | `strict-integrity: true` |
 |---|---|---|
-| Manifest matches binary | proceed, digest in summary | proceed, digest in summary |
-| Checksum mismatch | abort | abort |
-| No manifest published | proceed on commit/tag pinning (debug note) | **abort — fail closed** |
-| No manifest entry for this platform | proceed on commit/tag pinning (debug note) | **abort — fail closed** |
-| Manifest lookup redirected / non-HTTPS | proceed on commit/tag pinning (debug note) | **abort — fail closed** |
+| Source build, including cache restoration | proceed on commit/tag pinning and install-time digest, info log | abort without a release checksum lookup |
+| Release binary matches its exact asset checksum | proceed, digest in summary | proceed, digest in summary |
+| Release binary checksum mismatch | abort | abort |
+| Release verification has no manifest | abort | abort |
+| Release verification has no exact asset entry | abort | abort |
+| Release manifest lookup redirected / non-HTTPS | abort | abort |
 
 Strict mode raises the integrity bar only as high as D-07 allows: it
 proves the artifact matches what its release published, not who published
@@ -99,12 +109,19 @@ it.
 ## Provenance & Trust summary section (issue #373)
 
 `src/summary.ts` renders a per-run table with the executed engine's
-version, the SHA-256 of the binary as observed by published-checksum
-verification, and the fixture-pack digest once the download pipeline
-(#338) produces one. Metadata a run does not actually have is rendered as
-explicitly *unverified*, never omitted and never fabricated, and the
-section always carries the D-07/D-11 caveat so a summary screenshot cannot
-be read out of context.
+version and the SHA-256 computed directly from the executed binary. The
+summary also has a fixture-pack row, but on the current run path
+(`src/main.ts`) no verified pack digest is passed to the summary renderer,
+so that row is always rendered as *unverified*. The digest helper in
+`src/canary.ts` is not wired into the run. Metadata a run does not actually
+have is rendered as explicitly *unverified*, never omitted and never
+fabricated, and the section always carries the D-07/D-11 caveat so a
+summary screenshot cannot be read out of context.
+
+The opt-in execution receipt (`generate-receipt`, issue #360) is not part of
+the summary. It is a separate JSON file written after the summary has been
+rendered, uploaded as its own artifact, and reported through the
+`receipt-path` output.
 
 ## Least-privilege permissions and the fork PR trust boundary (issue #369)
 
@@ -114,7 +131,7 @@ used only opportunistically for rate limiting, and the reusable workflow
 ([`docs/reusable-workflow.md`](reusable-workflow.md)) documents the
 `pull_request` target model in which fork PRs run with a read-only token
 and no secrets. The detailed fork-PR threat analysis and the conformance
-tests live with the sibling `docs/security-model.md` line of work (#461);
+tests live with the sibling [`docs/security-model.md`](security-model.md);
 this document owns the integrity axis: what the Action trusts about the
 binary it runs and the channels it verifies it over.
 
@@ -124,7 +141,7 @@ binary it runs and the channels it verifies it over.
 |---|---|---|
 | Tampered release artifact | Substituted binary after publication | Checksum mismatch aborts before execution and before cache save (`src/canary.ts`) |
 | Cache poisoning | Malicious entry under a predictable Actions cache key | Cache key embeds platform, arch, and the immutable commit (`stellar-canary-<platform>-<arch>-<sha>`); restored binaries are re-verified; a verification failure never saves |
-| Redirect to attacker host | 3xx response during release/manifest lookup | Never followed (D-11 strictest reading); lookup degrades or, under strict-integrity, aborts |
+| Redirect to attacker host | 3xx response during release asset download | Never followed while D-11 is blocked; Engine installation warns and may use the pinned source build under default integrity, while fixture-pack download fails closed |
 | Downgrade to plaintext | `http://` asset URL | Unconditionally rejected — TLS client only, no second request |
 | Shell injection via inputs or engine output | Argument interpolation, fixture/PR text | Array-spawn only, no shell; inputs validated at boundary 1 |
 | Markdown / workflow-command injection via engine stderr | Diagnostic text in summary or logs | Fenced with CommonMark-longer fences (`src/summary.ts`) and neutralised (`src/redact.ts`) |
@@ -135,12 +152,11 @@ binary it runs and the channels it verifies it over.
 
 - D-07: release signing deferred upstream; until then nothing in this
   repository may present a checksum as authenticity.
-- D-11: redirect allowlist / hop budget / header-stripping policy blocked
-  pending verification against real release hosts.
-- #338: fixture-pack download with redirect and size limits — the pack
-  digest row in the summary stays "unverified" until this lands.
-- #360: execution receipt serialization (open PR) will feed additional
-  per-run provenance into the same summary section.
+- D-11: redirect allowlist / hop budget / header policy is blocked. The
+  candidate module is tested but not wired into runtime; maintainers still
+  need to approve the observed host pair and proposed behavior.
+- Fixture-pack digest: the summary does not receive a verified pack digest
+  on the current run path, so its pack row stays "unverified".
 
 ## References
 

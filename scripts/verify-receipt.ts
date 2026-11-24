@@ -216,10 +216,31 @@ function readJsonFile(filePath: string, label: string): JsonRead {
 }
 
 /**
+ * Formatted CLI help documentation detailing usage, arguments, and exit codes (#585).
+ */
+export const HELP_TEXT = `Usage: verify-receipt <receipt.json> <report.json>
+
+Arguments:
+  receipt.json    Execution Receipt to verify.
+  report.json     Canary JSON report to compare against.
+
+Options:
+  -h, --help      Show this help documentation.
+
+Exit codes:
+  0               Receipt matches the report.
+  1               Divergence detected.
+  2               Input is unreadable or invalid, or required arguments are missing.`;
+
+/**
  * CLI entry: `verify-receipt <receipt.json> <report.json>`. Returns the
  * process exit code so the function is directly unit-testable.
  */
 export function runCli(argv: readonly string[]): number {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    console.log(HELP_TEXT);
+    return 0;
+  }
   const [receiptPath, reportPath] = argv;
   if (argv.length !== 2 || receiptPath === undefined || reportPath === undefined) {
     console.error("usage: verify-receipt <receipt.json> <report.json>");

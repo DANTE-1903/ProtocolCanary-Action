@@ -30,10 +30,10 @@ interface RunResult {
 
 function runScript(
   args: string[],
-  options: { timeoutMs?: number; signal?: NodeJS.Signals; env?: Record<string, string> } = {},
+  options: { timeoutMs?: number; signal?: NodeJS.Signals; env?: Record<string, string>; scriptPath?: string } = {},
 ): Promise<RunResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [SCRIPT, ...args], {
+    const child = spawn(process.execPath, [options.scriptPath ?? SCRIPT, ...args], {
       env: { ...process.env, ...options.env },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -57,12 +57,12 @@ function runScript(
   });
 }
 
-function commonActionArgs(tmpDir: string): string[] {
+function commonActionArgs(tmpDir: string, engine: string = MOCK_ENGINE): string[] {
   const fixturesDir = path.join(tmpDir, "fixtures-checked-for-existence");
   fs.mkdirSync(fixturesDir, { recursive: true });
   return [
     "--engine",
-    MOCK_ENGINE,
+    engine,
     "--fixtures-dir",
     fixturesDir,
     "--input",
@@ -71,6 +71,11 @@ function commonActionArgs(tmpDir: string): string[] {
     "upload-report=false",
     "--input",
     "timeout-minutes=1",
+    // #433: the engine runs with an explicit allow-list, so the mock's
+    // scenario switch travels through the same `engine-env-passthrough`
+    // input a workflow would use.
+    "--input",
+    "engine-env-passthrough=MOCK_CANARY_SCENARIO",
   ];
 }
 
@@ -115,7 +120,7 @@ describe("scripts/run-local.mjs (local runner script)", () => {
       "GITHUB_STEP_SUMMARY",
       "GITHUB_ENV",
       "RUNNER_TEMP",
-      "CARGO_HOME",
+      "Action-owned install root",
       "npm run build",
     ];
     for (const token of expected) {
@@ -157,11 +162,55 @@ describe("scripts/run-local.mjs (local runner script)", () => {
     expect(result.stdout).toContain("Action exit code: 1");
     expect(listTemp()).toEqual(before);
   }, 60_000);
+
+  it.skipIf(skipProcessScenarios)("forwards valid config file to the Action environment", async () => {
+    const configFile = path.join(tmpDir, "valid-config.toml");
+    fs.writeFileSync(configFile, "# canary config\n");
+
+    const wrapperEngine = path.join(tmpDir, "mock-canary-wrapper.cjs");
+    const capturedArgsFile = path.join(tmpDir, "captured-check-args.json");
+    const wrapperContent = `#!/usr/bin/env node
+"use strict";
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+
+const args = process.argv.slice(2);
+if (args[0] === "check") {
+  fs.writeFileSync(${JSON.stringify(capturedArgsFile)}, JSON.stringify(args));
+}
+const child = spawnSync(process.execPath, [${JSON.stringify(MOCK_ENGINE)}, ...args], {
+  stdio: "inherit",
+  env: process.env,
+});
+process.exit(child.status ?? (child.signal !== null ? 1 : 0));
+`;
+    fs.writeFileSync(wrapperEngine, wrapperContent, { mode: 0o755 });
+
+    const before = listTemp();
+    const result = await runScript(
+      [
+        ...commonActionArgs(tmpDir, wrapperEngine),
+        "--input",
+        `config=${configFile}`,
+      ],
+      { env: { MOCK_CANARY_SCENARIO: "pass" } },
+    );
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("status=pass");
+
+    expect(fs.existsSync(capturedArgsFile)).toBe(true);
+    const capturedArgs = JSON.parse(fs.readFileSync(capturedArgsFile, "utf8")) as string[];
+    const configFlagIndex = capturedArgs.indexOf("--config");
+    expect(configFlagIndex).toBeGreaterThanOrEqual(0);
+    expect(capturedArgs[configFlagIndex + 1]).toBe(configFile);
+
+    expect(listTemp()).toEqual(before);
+  }, 60_000);
 });
 
 describe("scripts/run-local.mjs negative cases", () => {
   let tmpDir: string;
-  let movedDist: string | null = null;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "run-local-test-"));
@@ -169,16 +218,18 @@ describe("scripts/run-local.mjs negative cases", () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
-    if (movedDist !== null) {
-      fs.renameSync(movedDist, DIST);
-      movedDist = null;
-    }
   });
 
   it("a missing dist/index.js is a clear error naming 'npm run build'", async () => {
-    movedDist = `${DIST}.moved-by-test`;
-    fs.renameSync(DIST, movedDist);
-    const result = await runScript(["--engine", MOCK_ENGINE, "--input", "version=0.1.0"]);
+    // Give the script a private root with no dist bundle. Renaming the real
+    // committed bundle races with bundle-guard.test.ts, which reads it in a
+    // different Vitest worker.
+    const isolatedScript = path.join(tmpDir, "scripts", "run-local.mjs");
+    fs.mkdirSync(path.dirname(isolatedScript), { recursive: true });
+    fs.copyFileSync(SCRIPT, isolatedScript);
+    const result = await runScript(["--engine", MOCK_ENGINE, "--input", "version=0.1.0"], {
+      scriptPath: isolatedScript,
+    });
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain("npm run build");
   });
@@ -214,6 +265,32 @@ describe("scripts/run-local.mjs negative cases", () => {
     expect(result.stderr).toContain("--help");
   });
 
+  it("a config path that does not exist is rejected without running the Action", async () => {
+    const before = listTemp();
+    const result = await runScript([
+      "--engine",
+      MOCK_ENGINE,
+      "--input",
+      "config=nonexistent.toml",
+    ]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("config path does not exist (or is not a file)");
+    expect(listTemp()).toEqual(before);
+  });
+
+  it("a directory passed as config is rejected without running the Action", async () => {
+    const before = listTemp();
+    const result = await runScript([
+      "--engine",
+      MOCK_ENGINE,
+      "--input",
+      `config=${tmpDir}`,
+    ]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("config path does not exist (or is not a file)");
+    expect(listTemp()).toEqual(before);
+  });
+
   it.skipIf(skipProcessScenarios)("an interrupt during the run kills the child, cleans up, and exits non-zero", async () => {
     const fixturesDir = path.join(tmpDir, "fixtures");
     fs.mkdirSync(fixturesDir, { recursive: true });
@@ -228,6 +305,8 @@ describe("scripts/run-local.mjs negative cases", () => {
         "version=0.1.0",
         "--input",
         "upload-report=false",
+        "--input",
+        "engine-env-passthrough=MOCK_CANARY_SCENARIO",
       ],
       // The mock's "timeout" scenario keeps the engine alive ~10s (and the
       // Action's own timeout-minutes=1 floor would end it at a minute); a

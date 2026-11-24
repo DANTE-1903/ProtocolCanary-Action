@@ -120,7 +120,7 @@ describe("example matrix-aggregation workflow (#368)", () => {
   it("aggregates with always() after the matrix and downloads every report artifact", () => {
     expect(AGGREGATION_SOURCE).toContain("needs: canary-matrix");
     expect(AGGREGATION_SOURCE).toContain("if: always()");
-    expect(AGGREGATION_SOURCE).toContain("uses: actions/download-artifact@v4");
+    expect(AGGREGATION_SOURCE).toContain("uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2");
     expect(AGGREGATION_SOURCE).toContain("pattern: report-*");
     expect(AGGREGATION_SOURCE).toContain("merge-multiple: false");
     expect(AGGREGATION_SOURCE).toContain("EXPECTED_TARGETS:");

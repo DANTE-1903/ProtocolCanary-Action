@@ -51,13 +51,23 @@ export interface ExecutionReceipt {
  * arbitrary engine release may carry any of them with the wrong type or not
  * at all, and the receipt must never throw or guess.
  */
-type ReceiptSourceFields = Partial<CanaryReport> & {
+type ReceiptSourceFields = Partial<Omit<CanaryReport, "fixturePack">> & {
   readonly engineCommit?: unknown;
   readonly packDigest?: unknown;
+  readonly run?: {
+    readonly toolBuildCommit?: unknown;
+  };
+  readonly fixturePack?: {
+    readonly digest?: unknown;
+  };
 };
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function asProtocol(value: unknown): number | typeof UNKNOWN {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : UNKNOWN;
 }
 
 /**
@@ -117,11 +127,10 @@ export function buildReceipt(report: CanaryReport, timestamp: string = new Date(
   return {
     receiptVersion: RECEIPT_VERSION,
     engineVersion: redactReceiptString(asString(source.toolVersion) ?? UNKNOWN),
-    engineCommit: redactReceiptString(asString(source.engineCommit) ?? UNKNOWN),
-    packDigest: redactReceiptString(asString(source.packDigest) ?? UNKNOWN),
-    protocol: typeof source.targetProtocol === "number" ? source.targetProtocol : UNKNOWN,
-    observedProtocol:
-      typeof source.network?.observedProtocol === "number" ? source.network.observedProtocol : UNKNOWN,
+    engineCommit: redactReceiptString(asString(source.run?.toolBuildCommit ?? source.engineCommit) ?? UNKNOWN),
+    packDigest: redactReceiptString(asString(source.fixturePack?.digest ?? source.packDigest) ?? UNKNOWN),
+    protocol: asProtocol(source.targetProtocol),
+    observedProtocol: asProtocol(source.network?.observedProtocol),
     timestamp: redactReceiptString(timestamp),
   };
 }

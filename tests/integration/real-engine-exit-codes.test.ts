@@ -1,5 +1,6 @@
 import type * as actionsCore from "@actions/core";
 import { execFileSync } from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -77,6 +78,7 @@ const ENV_KEYS = [
   "INPUT_PROTOCOL",
   "INPUT_CONFIG",
   "INPUT_NETWORK",
+  "INPUT_NETWORK-PASSPHRASE",
   "INPUT_RPC-URL",
   "INPUT_FIXTURES-DIR",
   "INPUT_VERSION",
@@ -220,20 +222,26 @@ function setUp(version: string, options: { pack: "exit1" | "exit3" | "exit4" | "
   );
 
   const cargoHome = path.join(workDir, "cargo-home");
-  fs.mkdirSync(path.join(cargoHome, "bin"), { recursive: true });
+  fs.mkdirSync(cargoHome, { recursive: true });
+
+  const runnerTemp = path.join(workDir, "runner-temp");
+  const binaryDir = path.join(runnerTemp, "stellar-canary-action", "bin");
+  fs.mkdirSync(binaryDir, { recursive: true });
   // The engine is placed where the Action looks for an exact-version
   // installed binary (same convention as real-engine.test.ts), so the suite
   // exercises the check path only and never impulsively runs cargo install.
-  fs.copyFileSync(binary as string, path.join(cargoHome, "bin", "stellar-canary"));
-  fs.chmodSync(path.join(cargoHome, "bin", "stellar-canary"), 0o755);
-
-  const runnerTemp = path.join(workDir, "runner-temp");
-  fs.mkdirSync(runnerTemp, { recursive: true });
+  const destPath = path.join(binaryDir, "stellar-canary");
+  fs.copyFileSync(binary as string, destPath);
+  fs.chmodSync(destPath, 0o755);
+  const digest = crypto.createHash("sha256").update(fs.readFileSync(destPath)).digest("hex");
+  fs.writeFileSync(path.join(binaryDir, "stellar-canary.sha256"), `${digest}\n`, { mode: 0o600 });
+  fs.writeFileSync(path.join(binaryDir, "stellar-canary.origin"), "source-build\n", { mode: 0o600 });
   const outputPath = path.join(workDir, "github-output");
   fs.writeFileSync(outputPath, "");
   fs.writeFileSync(SUMMARY_PATH, "");
 
   for (const key of ENV_KEYS) delete process.env[key];
+  process.env["INPUT_NETWORK-PASSPHRASE"] = "\u0001";
   process.env.CARGO_HOME = cargoHome;
   process.env.RUNNER_TEMP = runnerTemp;
   process.env.GITHUB_OUTPUT = outputPath;

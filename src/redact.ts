@@ -42,7 +42,7 @@ const STELLAR_SEED_PATTERN = /\bS[A-Z2-7]{55}\b/g;
  * false positive only hides a harmless string, while a false negative leaks a
  * credential.
  */
-const SENSITIVE_ENV_NAME = /(TOKEN|SECRET|KEY|PASSWORD)/i;
+const SENSITIVE_ENV_NAME = /(TOKEN|SECRET|KEY|PASSWORD|PASSWD|PASSPHRASE|AUTH|CREDENTIAL)/i;
 
 /** Values shorter than this are skipped: masking a two-character value would
  * mangle unrelated text without protecting a realistic secret. */
@@ -59,7 +59,8 @@ function escapeRegExp(value: string): string {
 
 /**
  * Masks the values of environment variables whose names contain `TOKEN`,
- * `SECRET`, `KEY` or `PASSWORD`. Empty and very short values are ignored so a
+ * `SECRET`, `KEY`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `AUTH` or `CREDENTIAL`.
+ * Empty and very short values are ignored so a
  * trivially common string cannot rewrite the whole log. This reads the values
  * only to build search patterns; it never includes the ambient environment in
  * the returned text.
@@ -120,7 +121,10 @@ function redactUrlCredentials(text: string): string {
  * has been replaced, so a redaction cannot itself introduce a command.
  */
 export function escapeWorkflowCommands(text: string): string {
-  return text.replace(/::/g, "\\:\\:").replace(/`/g, "\\`");
+  return text.replace(/:{2,}/g, (colons) => "\\:".repeat(colons.length)).replace(/(\\*)`/g, (_match, slashes: string) => {
+    const prefix = slashes.length % 2 === 0 ? "\\" : "";
+    return `${prefix}${slashes}\``;
+  });
 }
 
 /**
@@ -147,4 +151,26 @@ export function redactSecrets(text: string): string {
  */
 export function redact(text: string): string {
   return escapeWorkflowCommands(redactSecrets(text));
+}
+
+/**
+ * Describes a parsed URL for an error message without echoing any credential
+ * it carries: the scheme, host (with port) and path are kept, userinfo is
+ * replaced by {@link REDACTED}, and a query string or fragment is dropped and
+ * replaced by a single {@link REDACTED} marker. The result is then passed
+ * through {@link redactSecrets}, so a recognised token shape in the path is
+ * masked as well.
+ *
+ * A URL with no authority (`mailto:`, `data:` and similar) is described only
+ * as having no host: for those forms the whole value is opaque, and even the
+ * "scheme" can be the leading part of a secret (`token123:rest` parses as the
+ * scheme `token123:`).
+ */
+export function describeUrlSafely(parsed: URL): string {
+  if (parsed.host === "") {
+    return "a URL with no host";
+  }
+  const userinfo = parsed.username !== "" || parsed.password !== "" ? `${REDACTED}@` : "";
+  const suffix = parsed.search !== "" || parsed.hash !== "" ? `?${REDACTED}` : "";
+  return redactSecrets(`${parsed.protocol}//${userinfo}${parsed.host}${parsed.pathname}${suffix}`);
 }

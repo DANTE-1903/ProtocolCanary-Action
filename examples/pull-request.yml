@@ -27,6 +27,9 @@ jobs:
         with:
           protocol: "28"
           upload-report: "true"
+          # Required for receipt-path below: the Execution Receipt is only
+          # generated when this input is enabled.
+          generate-receipt: "true"
 
       # Optional: use the Action's own outputs elsewhere in the workflow.
       - name: Show result
@@ -35,3 +38,12 @@ jobs:
           echo "status: ${{ steps.canary.outputs.status }}"
           echo "passed: ${{ steps.canary.outputs.passed }}"
           echo "failures: ${{ steps.canary.outputs.failures }}"
+          # coverage-state is `full` when every discovered fixture ran without
+          # skips, `partial` when some were skipped, and `none` when nothing
+          # ran. Gate promotions on `full` so skipped checks cannot silently
+          # ship; `none` is the conservative value on an execution failure.
+          echo "coverage-state: ${{ steps.canary.outputs.coverage-state }}"
+          # receipt-path is the local path to the generated Execution Receipt
+          # JSON: the machine-readable provenance record to upload or archive
+          # as a compliance artifact. Empty when no receipt was generated.
+          echo "receipt-path: ${{ steps.canary.outputs.receipt-path }}"
