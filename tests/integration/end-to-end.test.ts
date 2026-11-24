@@ -537,8 +537,8 @@ describe.skipIf(process.platform === "win32")("Action end-to-end (via mock-canar
     await run();
 
     expect(setFailedMock).toHaveBeenCalledTimes(1);
-    // 60 per-result annotations plus one exit-code annotation (#351).
-    expect(errorMock).toHaveBeenCalledTimes(61); // all 60 fail results should produce annotations
+    // 10 per-result annotations plus one exit-code annotation (#351, #614).
+    expect(errorMock).toHaveBeenCalledTimes(11);
     const outputs = readOutputs(fixture.outputPath);
     expect(outputs.status).toBe("fail");
     expect(outputs.failures).toBe("60");
