@@ -314,4 +314,55 @@ describe.skipIf(process.platform === "win32")("Execution Receipt integration (re
     fs.writeFileSync(tamperedPath, JSON.stringify(tampered, null, 2), "utf8");
     expect(runCli([tamperedPath, reportPath])).toBe(1);
   });
+
+  // #619: the verifier compares field-level provenance rather than hashing
+  // the whole report, so the mirror image of the receipt-side test above is
+  // the case that matters for a report that was altered after the fact.
+  // Mutating only a comparable provenance field in the *report* (the receipt
+  // is left byte-identical) must be detected, and the diagnostic must name
+  // the divergent field together with both values.
+  it.each([
+    ["packDigest", `sha256:${"b".repeat(64)}`],
+    ["engineCommit", "ffffffffffffffffffffffffffffffffffffffff"],
+  ])("detects a report-side %s provenance mismatch (#619)", async (field, mutatedValue) => {
+    fixture = setUp(provenanceReport());
+    const { run } = await import("../../src/main");
+    await run();
+
+    const outputs = readOutputs(fixture.outputPath);
+    const receiptPath = outputs["receipt-path"] as string;
+    const reportPath = outputs.report as string;
+    // The untampered pair verifies: the mismatch below comes from the
+    // mutation, not from the producer.
+    expect(runCli([receiptPath, reportPath])).toBe(0);
+
+    const reportJson = JSON.parse(fs.readFileSync(reportPath, "utf8")) as Record<string, unknown>;
+    const receiptValue = reportJson[field];
+    expect(typeof receiptValue).toBe("string");
+    reportJson[field] = mutatedValue;
+    fs.writeFileSync(reportPath, JSON.stringify(reportJson, null, 2), "utf8");
+
+    const stderr: string[] = [];
+    const errorSpy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      stderr.push(args.map((arg) => String(arg)).join(" "));
+    });
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    let exitCode: number;
+    try {
+      exitCode = runCli([receiptPath, reportPath]);
+    } finally {
+      logSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+
+    expect(exitCode).toBe(1);
+    const diagnostic = stderr.join("\n");
+    expect(diagnostic).toContain(field);
+    // Expected value (recorded in the receipt) and the observed value (the
+    // mutated report field) are both reported, so the divergence is
+    // actionable without reopening either file.
+    expect(diagnostic).toContain(String(receiptValue));
+    expect(diagnostic).toContain(mutatedValue);
+    expect(diagnostic).toContain("receipt does NOT match the report");
+  });
 });
