@@ -130,7 +130,24 @@ function setUp(scenario: string, options: { cargoHomeName?: string } = {}): Scen
   // NODE_OPTIONS tokenizer swallows backslashes inside quotes, so a quoted
   // `C:\\path\\to\\hook.cjs` arrives as `C:pathtohook.cjs` and the preload
   // silently fails (observed on windows-latest). Node accepts `/` on Windows.
-  process.env.NODE_OPTIONS = `--require "${toNodeOptionsPath(HOOK_PATH)}"`;
+  if (scenario === "protocol-mismatch") {
+    const hookFile = path.join(workDir, "mock-canary-protocol-mismatch-hook.cjs");
+    const hookScript = `"use strict";
+const path = require("node:path");
+const engineArgs = process.argv.slice(1);
+const subcmd = path.basename(engineArgs[0] ?? "");
+if (subcmd === "version") {
+  process.stdout.write("stellar-canary " + (process.env.MOCK_CANARY_VERSION ?? "${ENGINE_VERSION}") + "\\n");
+  process.exit(0);
+}
+process.stderr.write("error: protocol mismatch: target protocol 28 does not match fixture protocol 27\\n");
+process.exit(4);
+`;
+    fs.writeFileSync(hookFile, hookScript, "utf8");
+    process.env.NODE_OPTIONS = `--require "${toNodeOptionsPath(hookFile)}"`;
+  } else {
+    process.env.NODE_OPTIONS = `--require "${toNodeOptionsPath(HOOK_PATH)}"`;
+  }
   // Make cargo unfindable: with the exact-version binary already in
   // CARGO_HOME/bin, ensureCanaryInstalled must short-circuit to it and never
   // attempt an install. If some code path ever reached for cargo here, the
@@ -254,6 +271,26 @@ describe("Action against the Node-copy mock engine (Windows spawn path)", () => 
     expect(String(setFailedMock.mock.calls[0]?.[0])).toContain("could not be executed");
     expect(readOutputs(scenario.outputPath).status).toBe("execution-failed");
     expect(fs.readFileSync(SUMMARY_PATH, "utf8")).toContain("could not be executed");
+  });
+
+  it("protocol-mismatch: exit code 4 (ProtocolMismatch) is an execution failure on the real spawn path", async () => {
+    scenario = setUp("protocol-mismatch");
+    const { run } = await import("../../src/main");
+    await run();
+
+    expect(setFailedMock).toHaveBeenCalledTimes(1);
+    expect(String(setFailedMock.mock.calls[0]?.[0])).toContain("could not be executed");
+    expect(String(setFailedMock.mock.calls[0]?.[0])).toContain("exit code 4");
+    const outputs = readOutputs(scenario.outputPath);
+    expect(outputs.status).toBe("execution-failed");
+    expect(outputs.passed).toBe("0");
+    expect(outputs.failures).toBe("0");
+    expect(outputs.errors).toBe("0");
+    const summary = fs.readFileSync(SUMMARY_PATH, "utf8");
+    expect(summary).toContain("could not be executed");
+    expect(summary).toContain("exit code 4");
+    expect(summary).toContain("protocol mismatch");
+    expect(errorMock).toHaveBeenCalled();
   });
 
   it("an unknown scenario name makes the mock exit non-zero mid-contract and the Action reports an execution failure", async () => {
