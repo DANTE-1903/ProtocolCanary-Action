@@ -216,6 +216,25 @@ describe("runCli (#363) — real files and exit codes", () => {
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining("usage:"));
   });
 
+  it("exits 2 with a descriptive error when the receipt path is a directory", () => {
+    const receiptDir = path.join(dir, "receipt-dir");
+    fs.mkdirSync(receiptDir);
+    const reportPath = write("report.json", JSON.stringify(documentedReport()));
+
+    expect(runCli([receiptDir, reportPath])).toBe(2);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("Cannot read the receipt file"));
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining(receiptDir));
+  });
+
+  it("exits 2 with a descriptive error when the receipt file is empty", () => {
+    const emptyReceipt = write("empty-receipt.json", "");
+    const reportPath = write("report.json", JSON.stringify(documentedReport()));
+
+    expect(runCli([emptyReceipt, reportPath])).toBe(2);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining("not valid JSON"));
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining(emptyReceipt));
+  });
+
   it("prints usage documentation to stdout and exits 0 on --help (#585)", () => {
     const exitCode = runCli(["--help"]);
     expect(exitCode).toBe(0);
