@@ -35,6 +35,16 @@ jobs:
         # version and is not saved to package.json or the lockfile.
         run: npx --yes @stryker-mutator/core@7.7.4 stryker run
 
+      - name: Verify mutation report was produced
+        if: always()
+        shell: bash
+        run: |
+          report="reports/mutation/mutation-report.json"
+          if [[ ! -f "$report" ]]; then
+            echo "::error::Stryker did not produce the expected mutation report at $report." >&2
+            exit 1
+          fi
+
       - name: Write mutation score and surviving mutants to the job summary
         id: summary
         continue-on-error: true
