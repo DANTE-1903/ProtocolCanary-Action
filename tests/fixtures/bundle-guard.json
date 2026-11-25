@@ -57,8 +57,8 @@
       "from": "@actions/artifact (status page link in the download error message)"
     }
   ],
-  "committedBundleCompressedBytes": 573220,
-  "committedBundleUncompressedBytes": 2158029,
+  "committedBundleCompressedBytes": 573322,
+  "committedBundleUncompressedBytes": 2158529,
   "maxSizeBytes": 2200030,
   "warningThresholdBytes": 2100000,
   "maxCompressedSizeBytes": 630000,
