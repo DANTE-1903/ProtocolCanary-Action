@@ -736,6 +736,7 @@ export type ExitCodeCategory =
   | "execution_error"
   | "invalid_fixture"
   | "internal_error"
+  | "verification_failure"
   | "unknown";
 
 interface ExitCodeInfo {
@@ -770,6 +771,10 @@ const EXIT_CODES: Readonly<Record<number, ExitCodeInfo>> = {
   5: {
     category: "internal_error",
     description: "An internal error unrelated to configuration, fixtures, or the three compatibility surfaces.",
+  },
+  6: {
+    category: "verification_failure",
+    description: "Fixture verification failed against authoritative ledger or RPC evidence.",
   },
 };
 

@@ -239,14 +239,19 @@ function assertBundlePresent(): void {
   }
 }
 
-/** Runs a Node script with the runner's environment and kills it at
+/** Runs a Node script with an explicit environment and kills it at
  * `timeoutMs`, reporting the timeout instead of hanging the suite. */
-function runNode(scriptPath: string, runner: Runner, timeoutMs: number): Promise<RunResult> {
+function spawnNodeWithEnv(
+  scriptPath: string,
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  timeoutMs: number,
+): Promise<RunResult> {
   return new Promise<RunResult>((resolve) => {
     const startedAt = Date.now();
     const child = spawn(process.execPath, [scriptPath], {
-      cwd: runner.workDir,
-      env: runner.env,
+      cwd,
+      env,
       stdio: ["ignore", "pipe", "pipe"],
     });
 
@@ -281,6 +286,11 @@ function runNode(scriptPath: string, runner: Runner, timeoutMs: number): Promise
       settle(code, signal);
     });
   });
+}
+
+/** Runs a Node script with the runner's environment. */
+function runNode(scriptPath: string, runner: Runner, timeoutMs: number): Promise<RunResult> {
+  return spawnNodeWithEnv(scriptPath, runner.env, runner.workDir, timeoutMs);
 }
 
 /** Runs the committed bundle (`dist/index.js`) once. */
@@ -391,6 +401,30 @@ describe.skipIf(IS_WINDOWS)("committed bundle (dist/index.js)", () => {
     expect(combined).toMatch(/cargo`? command was not found|cargo.*not found/i);
   });
 
+  // #624: a workflow runner always supplies INPUT_* variables, so the
+  // argument-less invocation is the one path where the Action must fail as a
+  // normal, diagnosed Action error rather than crashing on an unexpected
+  // `undefined`. `setFailed` writes its diagnostic as a `::error::`
+  // workflow command on stdout; stderr must stay free of an unhandled
+  // rejection or a raw Node stack trace.
+  it("invoked with an empty environment: exits 1 with a clean diagnostic, not an unhandled stack trace (#624)", async () => {
+    assertBundlePresent();
+    const result = await spawnNodeWithEnv(DIST_INDEX, {}, REPO_ROOT, RUN_TIMEOUT_MS);
+
+    expect(result.timedOut, describeRun(result)).toBe(false);
+    expect(result.exitCode, describeRun(result)).toBe(1);
+
+    const combined = `${result.stdout}\n${result.stderr}`;
+    expect(combined, describeRun(result)).toMatch(/::error::|Invalid .* input/);
+    expect(combined).toContain('Invalid "network-passphrase" input');
+
+    expect(result.stderr, describeRun(result)).not.toMatch(
+      /UnhandledPromiseRejection|unhandled rejection|Unhandled 'error' event|node:internal/i,
+    );
+    expect(result.stderr, describeRun(result)).not.toMatch(/^\s+at .+\(.+:\d+:\d+\)$/m);
+    expect(result.durationMs, describeRun(result)).toBeLessThan(RUN_TIMEOUT_MS);
+  });
+
   it("a truncated bundle fails with the runtime error, not with a hang", async () => {
     runner = createRunner({ scenario: "pass" });
     assertBundlePresent();
@@ -399,7 +433,7 @@ describe.skipIf(IS_WINDOWS)("committed bundle (dist/index.js)", () => {
     const truncatedPath = path.join(runner.workDir, "index-truncated.js");
     fs.writeFileSync(truncatedPath, bundle.subarray(0, Math.min(256, bundle.length)));
 
-    const result = await runNode(truncatedPath, runner, 5_000);
+    const result = await spawnNodeWithEnv(truncatedPath, runner.env, runner.workDir, 5_000);
     const output = `${result.stdout}\n${result.stderr}`;
 
     expect(result.timedOut, `the truncated bundle hung instead of failing: ${describeRun(result)}`).toBe(false);
