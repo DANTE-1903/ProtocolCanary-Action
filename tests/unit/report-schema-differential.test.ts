@@ -770,4 +770,158 @@ describe("#447 report schema differential conformance", () => {
     expect(cases.filter((c) => c.kind === "mutated").length).toBeGreaterThanOrEqual(300);
     expect(observed.size).toBe(divergences.length);
   });
+
+  describe("empty results list differential validation (#660)", () => {
+    it("schema validation and parseReport agree on a valid empty run with zero executed fixtures", () => {
+      const report: SchemaNode = {
+        schemaVersion: 1,
+        toolVersion: "0.1.0",
+        targetProtocol: 28,
+        project: { name: "example-project", type: "soroban" },
+        status: "pass",
+        counts: { total: 0, passed: 0, failed: 0, warnings: 0, errors: 0, skipped: 0 },
+        results: [],
+      };
+
+      const violations = schemaViolations(report);
+      expect(violations).toEqual([]);
+
+      const verdict = actionVerdict(report);
+      expect(verdict.accepted).toBe(true);
+
+      const parsed = parseReport(JSON.stringify(report));
+      expect(parsed.results).toEqual([]);
+      expect(parsed.counts.total).toBe(0);
+      expect(parsed.counts.passed).toBe(0);
+      expect(parsed.counts.failed).toBe(0);
+      expect(parsed.counts.warnings).toBe(0);
+      expect(parsed.counts.errors).toBe(0);
+      expect(parsed.counts.skipped).toBe(0);
+    });
+
+    it("schema validation and parseReport agree on an empty run with skipped fixtures", () => {
+      const report: SchemaNode = {
+        schemaVersion: 1,
+        toolVersion: "0.1.0",
+        targetProtocol: 28,
+        project: { name: "example-project", type: "soroban" },
+        status: "pass",
+        counts: { total: 0, passed: 0, failed: 0, warnings: 0, errors: 0, skipped: 2 },
+        results: [],
+        skipped: [
+          {
+            fixtureId: "p27-xdr-legacy",
+            surface: "xdr",
+            reason: "fixture targets protocol 27, this run targets protocol 28",
+            code: "UNSUPPORTED_PROTOCOL",
+          },
+          {
+            fixtureId: "p29-soroban-future",
+            surface: "soroban",
+            reason: "fixture targets protocol 29",
+            code: "UNSUPPORTED_PROTOCOL",
+          },
+        ],
+      };
+
+      const violations = schemaViolations(report);
+      expect(violations).toEqual([]);
+
+      const verdict = actionVerdict(report);
+      expect(verdict.accepted).toBe(true);
+
+      const parsed = parseReport(JSON.stringify(report));
+      expect(parsed.results).toHaveLength(0);
+      expect(parsed.counts.total).toBe(0);
+      expect(parsed.counts.passed).toBe(0);
+      expect(parsed.counts.skipped).toBe(2);
+    });
+
+    it("parses empty results without counts by deriving zero totals (del:counts divergence)", () => {
+      const report: SchemaNode = {
+        schemaVersion: 1,
+        toolVersion: "0.1.0",
+        targetProtocol: 28,
+        project: { name: "example-project", type: "soroban" },
+        status: "pass",
+        results: [],
+      };
+
+      // Schema requires counts; parseReport re-derives them.
+      const violations = schemaViolations(report);
+      expect(violations).toContain("$.counts: missing required property");
+
+      const verdict = actionVerdict(report);
+      expect(verdict.accepted).toBe(true);
+
+      const parsed = parseReport(JSON.stringify(report));
+      expect(parsed.results).toEqual([]);
+      expect(parsed.counts).toEqual({
+        total: 0,
+        passed: 0,
+        failed: 0,
+        warnings: 0,
+        errors: 0,
+        skipped: 0,
+      });
+    });
+
+    it("both schema and parseReport reject reports with an omitted results field", () => {
+      const report: SchemaNode = {
+        schemaVersion: 1,
+        toolVersion: "0.1.0",
+        targetProtocol: 28,
+        project: { name: "example-project", type: "soroban" },
+        status: "pass",
+        counts: { total: 0, passed: 0, failed: 0, warnings: 0, errors: 0, skipped: 0 },
+      };
+
+      const violations = schemaViolations(report);
+      expect(violations).toContain("$.results: missing required property");
+
+      const verdict = actionVerdict(report);
+      expect(verdict.accepted).toBe(false);
+      expect(verdict.error).toContain('"results"');
+    });
+
+    it("both schema and parseReport reject reports where results is not an array", () => {
+      const report: SchemaNode = {
+        schemaVersion: 1,
+        toolVersion: "0.1.0",
+        targetProtocol: 28,
+        project: { name: "example-project", type: "soroban" },
+        status: "pass",
+        counts: { total: 0, passed: 0, failed: 0, warnings: 0, errors: 0, skipped: 0 },
+        results: "none",
+      };
+
+      const violations = schemaViolations(report);
+      expect(violations.some((v) => v.includes("$.results"))).toBe(true);
+
+      const verdict = actionVerdict(report);
+      expect(verdict.accepted).toBe(false);
+      expect(verdict.error).toContain('"results"');
+    });
+
+    it("parseReport rejects an empty results array when counts claims executed fixtures (probe:counts-disagree)", () => {
+      const report: SchemaNode = {
+        schemaVersion: 1,
+        toolVersion: "0.1.0",
+        targetProtocol: 28,
+        project: { name: "example-project", type: "soroban" },
+        status: "pass",
+        counts: { total: 1, passed: 1, failed: 0, warnings: 0, errors: 0, skipped: 0 },
+        results: [],
+      };
+
+      // Schema cannot validate cross-field consistency.
+      const violations = schemaViolations(report);
+      expect(violations).toEqual([]);
+
+      // parseReport enforces that counts match results.
+      const verdict = actionVerdict(report);
+      expect(verdict.accepted).toBe(false);
+      expect(verdict.error).toContain("counts");
+    });
+  });
 });
