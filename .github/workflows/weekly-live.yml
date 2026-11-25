@@ -25,6 +25,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: weekly-live-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   # The label that identifies the single open tracking issue (#420).
   TRACKING_LABEL: weekly-live

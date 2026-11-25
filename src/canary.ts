@@ -262,6 +262,8 @@ function prebuiltAssetName(version: string, triple: string): string {
 
 /** Maximum wall-clock time for one release archive download. */
 const PREBUILT_DOWNLOAD_TIMEOUT_MS = 120_000;
+const PREBUILT_DOWNLOAD_SOCKET_TIMEOUT_MS = 30_000;
+const PREBUILT_DOWNLOAD_MAX_ATTEMPTS = 3;
 
 /**
  * Time bounds for the three small helper child processes the install chain
@@ -283,7 +285,39 @@ export const TAR_EXTRACTION_TIMEOUT_MS = 5 * 60_000;
  * never parses or requests a Location target. The download has a 120-second
  * wall-clock budget, an asset-size limit, and partial files are removed on
  * every failure. */
-export function httpsGetFile(url: string, destPath: string): Promise<void> {
+export async function httpsGetFile(url: string, destPath: string): Promise<void> {
+  const deadline = Date.now() + PREBUILT_DOWNLOAD_TIMEOUT_MS;
+  for (let attempt = 1; attempt <= PREBUILT_DOWNLOAD_MAX_ATTEMPTS; attempt++) {
+    const remainingTimeMs = deadline - Date.now();
+    if (remainingTimeMs <= 0) {
+      throw new InstallationFailedError(
+        `Release asset download exceeded its ${PREBUILT_DOWNLOAD_TIMEOUT_MS} ms total time budget.`,
+      );
+    }
+    try {
+      await httpsGetFileAttempt(url, destPath, remainingTimeMs);
+      return;
+    } catch (error) {
+      const timedOut =
+        error instanceof Error &&
+        (/^timed out downloading release asset$/.test(error.message) ||
+          /^release asset download exceeded its \d+ ms total time budget$/.test(error.message));
+      if (!timedOut) throw error;
+      if (Date.now() >= deadline) {
+        throw new InstallationFailedError(
+          `Release asset download exceeded its ${PREBUILT_DOWNLOAD_TIMEOUT_MS} ms total time budget: ${error.message}`,
+        );
+      }
+      if (attempt === PREBUILT_DOWNLOAD_MAX_ATTEMPTS) {
+        throw new InstallationFailedError(
+          `Release asset download exhausted its retry limit after ${PREBUILT_DOWNLOAD_MAX_ATTEMPTS} attempts: ${error.message}`,
+        );
+      }
+    }
+  }
+}
+
+function httpsGetFileAttempt(url: string, destPath: string, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     let settled = false;
     let request: ClientRequest | undefined = undefined;
@@ -325,8 +359,8 @@ export function httpsGetFile(url: string, destPath: string): Promise<void> {
     }
 
     totalTimeout.handle = setTimeout(
-      () => fail(new Error(`release asset download exceeded its ${PREBUILT_DOWNLOAD_TIMEOUT_MS} ms total time budget`)),
-      PREBUILT_DOWNLOAD_TIMEOUT_MS,
+      () => fail(new Error(`release asset download exceeded its ${timeoutMs} ms total time budget`)),
+      timeoutMs,
     );
     try {
       request = https.get(url, { headers: { "User-Agent": "ProtocolCanary-Action" } }, (response) => {
@@ -356,6 +390,7 @@ export function httpsGetFile(url: string, destPath: string): Promise<void> {
       request.on("timeout", () => {
         request?.destroy(new Error(`timed out downloading release asset`));
       });
+      request.setTimeout?.(Math.min(timeoutMs, PREBUILT_DOWNLOAD_SOCKET_TIMEOUT_MS));
       request.on("error", fail);
     } catch {
       fail(new Error("could not start HTTPS release asset download"));
