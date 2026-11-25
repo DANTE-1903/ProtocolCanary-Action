@@ -170,6 +170,104 @@ describe("buildReceipt (#360)", () => {
     expect(nonNumberReceipt.observedProtocol).toBe("unknown");
   });
 
+  describe("protocol boundary and non-integer inputs (#651)", () => {
+    it.each([
+      ["zero", 0],
+      ["a negative value", -1],
+      ["a larger negative value", -28],
+      ["negative zero", -0],
+    ])("resolves protocol %s to the 'unknown' sentinel", (_name, protocol) => {
+      const source = {
+        ...report(),
+        targetProtocol: protocol,
+        network: { name: "testnet", observedProtocol: protocol },
+      } as unknown as CanaryReport;
+      const receipt = buildReceipt(source, TS);
+      expect(receipt.protocol).toBe("unknown");
+      expect(receipt.observedProtocol).toBe("unknown");
+      // The sentinel stays a sentinel in the serialized schema — never coerced
+      // into 0, -1, NaN, or omitted.
+      const parsed = JSON.parse(serializeReceipt(receipt)) as Record<string, unknown>;
+      expect(parsed.protocol).toBe("unknown");
+      expect(parsed.observedProtocol).toBe("unknown");
+    });
+
+    it.each([
+      ["a fractional number", 28.5],
+      ["a string integer", "28"],
+      ["a string fraction", "28.5"],
+      ["a hexadecimal string", "0x1C"],
+      ["an empty string", ""],
+      ["a numeric NaN", NaN],
+      ["Infinity", Infinity],
+      ["a boolean", true],
+      ["null", null],
+    ])("resolves non-integer protocol input %s to 'unknown'", (_name, protocol) => {
+      const source = {
+        ...report(),
+        targetProtocol: protocol,
+        network: { name: "testnet", observedProtocol: protocol },
+      } as unknown as CanaryReport;
+      const receipt = buildReceipt(source, TS);
+      expect(receipt.protocol).toBe("unknown");
+      expect(receipt.observedProtocol).toBe("unknown");
+      expect(() => buildReceipt(source, TS)).not.toThrow();
+    });
+
+    it("keeps the smallest valid protocol (1) as a JSON number", () => {
+      const receipt = buildReceipt(
+        report({ targetProtocol: 1, network: { name: "testnet", observedProtocol: 1 } }),
+        TS,
+      );
+      expect(receipt.protocol).toBe(1);
+      expect(receipt.observedProtocol).toBe(1);
+      const parsed = JSON.parse(serializeReceipt(receipt)) as Record<string, unknown>;
+      expect(parsed.protocol).toBe(1);
+      expect(typeof parsed.protocol).toBe("number");
+    });
+
+    it("records a large integer protocol (999) as a JSON number, not a string", () => {
+      const receipt = buildReceipt(
+        report({ targetProtocol: 999, network: { name: "testnet", observedProtocol: 999 } }),
+        TS,
+      );
+      expect(receipt.protocol).toBe(999);
+      expect(receipt.observedProtocol).toBe(999);
+      const json = serializeReceipt(receipt);
+      expect(json).toContain('"protocol": 999');
+      expect(json).not.toContain('"protocol": "999"');
+      const parsed = JSON.parse(json) as Record<string, unknown>;
+      expect(parsed.protocol).toBe(999);
+      expect(typeof parsed.protocol).toBe("number");
+      expect(parsed.observedProtocol).toBe(999);
+      expect(typeof parsed.observedProtocol).toBe("number");
+    });
+
+    it("preserves the largest exact integer protocol (Number.MAX_SAFE_INTEGER)", () => {
+      const receipt = buildReceipt(
+        report({ targetProtocol: Number.MAX_SAFE_INTEGER }),
+        TS,
+      );
+      expect(receipt.protocol).toBe(Number.MAX_SAFE_INTEGER);
+      expect(JSON.parse(serializeReceipt(receipt)).protocol).toBe(Number.MAX_SAFE_INTEGER);
+    });
+
+    it("honours the per-field boundary independently for target and observed protocol", () => {
+      const partial = {
+        ...report(),
+        targetProtocol: 0,
+        network: { name: "testnet", observedProtocol: 29 },
+      } as unknown as CanaryReport;
+      const receipt = buildReceipt(partial, TS);
+      expect(receipt.protocol).toBe("unknown");
+      expect(receipt.observedProtocol).toBe(29);
+      const parsed = JSON.parse(serializeReceipt(receipt)) as Record<string, unknown>;
+      expect(parsed.protocol).toBe("unknown");
+      expect(parsed.observedProtocol).toBe(29);
+      expect(typeof parsed.observedProtocol).toBe("number");
+    });
+  });
+
   it("never throws on a bare report object — every field falls back to 'unknown'", () => {
     const receipt = buildReceipt({} as unknown as CanaryReport, TS);
     expect(receipt).toEqual({

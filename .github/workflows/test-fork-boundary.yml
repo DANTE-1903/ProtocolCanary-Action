@@ -19,6 +19,10 @@ on:
       - 'docs/security-model.md'
   workflow_dispatch:
 
+# Least privilege (#667): this workflow only reads repository workflow files and
+# exercises this run's own ephemeral token, so every scope it can express stays
+# read-only. The top-level block below is the default for every job; the job
+# restates it so a new step cannot inherit a wider scope by accident.
 permissions:
   contents: read
 
