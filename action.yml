@@ -195,33 +195,33 @@ inputs:
 
   timeout-minutes:
     description: >-
-      Maximum time to let the Canary process run before it is terminated
-      and the Action fails with a timeout error. Also bounds the
-      `cargo install` step (floored at one minute, so a very small value
-      set purely for the check cannot break installation); see the README's
-      Timeouts section. Must be a whole number of minutes from 1 to 35791:
-      the value is multiplied by 60,000 and passed to Node's `setTimeout`,
-      which clamps any delay above 2,147,483,647 ms (about 35,791 minutes)
-      and would fire the timer after 1 ms, ending the run almost
-      immediately, so larger values are rejected up front. It is unrelated
-      to GitHub Actions' own job/step-level `timeout-minutes`, which the
-      platform enforces over the whole job: set any surrounding job- or
-      step-level `timeout-minutes` comfortably higher than this value,
-      otherwise GitHub's own timeout can terminate the step first with a
-      generic error and no Canary summary, annotations, or timeout
+      Maximum time, in whole minutes, to let the Canary process run before the
+      Action terminates it and reports a timeout error. Defaults to `15`.
+      Accepts an integer from 1 to 35791 inclusive: values below 1 or above
+      35791 are rejected during input validation. The upper bound exists because
+      the value is multiplied by 60,000 and passed to Node's `setTimeout`, which
+      clamps delays above 2,147,483,647 ms (about 35,791 minutes) to 1 ms; the
+      Action rejects larger values up front instead of timing out immediately.
+      This input also bounds the `cargo install` step, floored at one minute so
+      a very small check timeout cannot break installation; see the README's
+      Timeouts section. It is unrelated to GitHub Actions' own job/step-level
+      `timeout-minutes`: set any surrounding job- or step-level timeout
+      comfortably higher than this value, otherwise GitHub can terminate the step
+      first with a generic error and no Canary summary, annotations, or timeout
       diagnostic.
     required: false
     default: "15"
 
   allow-empty:
     description: >-
-      Let a run that executes no checks pass. Protocol Canary 0.2.0 and newer
-      fail such a run (exit code 2: no fixture directory, no fixture files, or
-      every fixture skipped for the target protocol); set this to `true` only
-      when an empty run is intended. Forwarded as `--allow-empty` when the
-      resolved `version` is 0.2.0 or newer. With an older version it has no
-      effect, because those versions already pass an empty run and reject the
-      flag. Defaults to `false`.
+      Allow a run that executes no checks to pass instead of failing. Defaults to
+      `false`. When `true`, Protocol Canary 0.2.0 and newer receives
+      `--allow-empty` and treats an empty run as passing. An empty run includes
+      cases where no fixture directory is found, no fixture files match, or every
+      discovered fixture is skipped for the target protocol. With an older
+      resolved `version`, this input has no effect because those versions already
+      pass an empty run and reject the `--allow-empty` flag. Set to `true` only
+      when an empty fixture set is intentional for the workflow.
     required: false
     default: "false"
 

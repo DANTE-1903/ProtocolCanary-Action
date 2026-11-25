@@ -1,6 +1,16 @@
-# Minimal usage: check the current repository against the protocol
-# declared in its own .stellar-canary.toml (or protocol 28 if there is no
-# configuration file), using fixtures from a local `fixtures/` directory.
+# Minimal usage: check the current repository using fixtures from a local
+# `fixtures/` directory. When `protocol` is omitted, the CLI reads it from
+# `.stellar-canary.toml` in the project root, or uses protocol 28 when no
+# configuration file is present. Set the `config` input to select another
+# configuration file.
+#
+# Supported GitHub-hosted runners: `ubuntu-latest`, `macos-latest`, and
+# `windows-latest`. This example uses Ubuntu; choose another supported label
+# for a different platform.
+#
+# Disable checkout credential persistence so later steps cannot use the
+# checkout token through Git's local configuration. The report artifact is
+# uploaded by default through the runner's artifact service.
 #
 # Prefer this example for a push-only smoke check on `main`. See
 # pull-request.yml for gating pull requests instead, with the JSON report
@@ -20,6 +30,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Stellar Protocol Canary
         uses: StellarCanary/ProtocolCanary-Action@v1

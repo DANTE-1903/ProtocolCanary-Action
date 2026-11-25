@@ -398,6 +398,25 @@ describe("action.yml outputs and run() stay in sync (#412)", () => {
       expect(declared, `run() sets output "${name}" but action.yml does not declare it`).toContain(name);
     }
   });
+
+  it("documents every declared output with a non-empty, non-placeholder description", () => {
+    const declared = declaredOutputs();
+    const rows = readmeTable("Outputs");
+    for (const name of declared) {
+      const row = rows.get(name);
+      expect(row, `action.yml declares output "${name}" but README.md's Outputs table has no row for it`).toBeDefined();
+      if (row === undefined) {
+        continue; // Already reported by the presence check above.
+      }
+      expect(row.length, `README.md's Outputs table row for "${name}" does not have 3 columns`).toBe(3);
+      const description = row[1] ?? "";
+      expect(description.trim(), `README.md's Outputs table row for "${name}" has an empty description`).not.toBe("");
+      expect(
+        description,
+        `README.md's Outputs table row for "${name}" contains placeholder text`,
+      ).not.toMatch(/\b(?:TODO|TBD)\b/i);
+    }
+  });
 });
 
 describe("README tables match action.yml (#412)", () => {
