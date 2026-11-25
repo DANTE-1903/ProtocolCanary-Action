@@ -173,6 +173,7 @@ describe("emitExitFailureAnnotation", () => {
     [3, "At least one check could not complete — it was executed but hit an XDR, RPC, or Soroban execution problem."],
     [4, "A fixture file failed to load or validate, so the run never started."],
     [5, "An internal error unrelated to configuration, fixtures, or the three compatibility surfaces."],
+    [6, "Fixture verification failed against authoritative ledger or RPC evidence."],
   ])("formats annotation for exit code %i with engine documented description (#502)", (code, expectedDescription) => {
     emitExitFailureAnnotation(code, "diag");
     const message = String(errorMock.mock.calls.at(-1)?.[0]);
@@ -187,13 +188,15 @@ describe("emitExitFailureAnnotation", () => {
     expect(properties?.startLine).toBeUndefined();
   });
 
-  it("formats exit code 6 with the unrecognized exit code fallback (#587)", () => {
-    emitExitFailureAnnotation(6, "verification failed: checksum mismatch");
+  it("classifies exit code 6 as verification failure and carries the diagnostic (#623)", () => {
+    emitExitFailureAnnotation(6, "verification failed: ledger entry hash mismatch");
     expect(errorMock).toHaveBeenCalledTimes(1);
     const message = String(errorMock.mock.calls[0]?.[0]);
     expect(message).toContain("exit code 6");
-    expect(message).toContain("Unrecognized exit code 6.");
-    expect(message).toContain("verification failed: checksum mismatch");
+    expect(message).toContain("Fixture verification failed against authoritative ledger or RPC evidence.");
+    expect(message).not.toContain("Unrecognized exit code");
+    expect(message).toContain("ledger entry hash mismatch");
+    expect(message).toContain("Engine diagnostic:");
   });
 
   it("formats a negative exit code with the fallback description and retains diagnostics (#587)", () => {
@@ -205,7 +208,7 @@ describe("emitExitFailureAnnotation", () => {
     expect(message).toContain("Engine diagnostic: process terminated by signal SIGKILL");
   });
 
-  it.each([6, -1, 127])("keeps the workflow title and omits file/line for unmapped exit code %i (#587)", (code) => {
+  it.each([-1, 7, 127])("keeps the workflow title and omits file/line for unmapped exit code %i (#587)", (code) => {
     emitExitFailureAnnotation(code, "engine diagnostic");
     expect(errorMock).toHaveBeenCalledTimes(1);
     expect(errorMock.mock.calls[0]?.[1]).toMatchObject({ title: "Stellar Protocol Canary" });

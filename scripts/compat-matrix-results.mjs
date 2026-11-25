@@ -22,6 +22,60 @@ const PROJECT_TYPES = new Set(["soroban", "rpc-consumer", "stellar-sdk", "generi
 const RESULT_SURFACES = new Set(["xdr", "rpc", "soroban"]);
 const MAX_DIAGNOSTIC_LENGTH = 512;
 const FIXTURE_PARSE_DIAGNOSTIC = /\b(?:invalid (?:soroban |xdr )?fixture(?: body)?|failed to parse fixture|unsupported arg kind)\b/i;
+const CLI_NAME = "compat-matrix-results";
+const EXPECTATIONS_PATH = "docs/compat-expectations.json";
+
+/**
+ * #670: a results input file that is missing, unparseable or malformed must
+ * fail with a formatted diagnostic that names the file, never with an
+ * unhandled stack trace. The diagnostic is a GitHub Actions annotation
+ * (`::error file=<path>::`) so the runner renders it on the pull request while
+ * the `file=` token keeps the message machine-readable outside the runner.
+ */
+class ResultsInputError extends Error {
+  constructor(filePath, code, reason) {
+    super(reason);
+    this.name = "ResultsInputError";
+    this.filePath = filePath;
+    this.code = code;
+  }
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function errorCode(error) {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const code = error.code;
+    if (typeof code === "string") return code;
+  }
+  return null;
+}
+
+function formatCliError(error) {
+  const filePath = error instanceof ResultsInputError ? error.filePath : null;
+  const code = error instanceof ResultsInputError ? error.code : "unexpected-error";
+  const location = filePath === null ? "" : ` file=${filePath}`;
+  const where = filePath === null ? "" : ` ${filePath}:`;
+  return `::error${location}::${CLI_NAME}: ${code}:${where} ${errorMessage(error)}`;
+}
+
+/** Reads a JSON results input, reporting a missing or unparseable file by path. */
+function readResultsInput(filePath) {
+  let raw;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch (error) {
+    const code = errorCode(error) === "ENOENT" ? "results-input-missing" : "results-input-unreadable";
+    throw new ResultsInputError(filePath, code, errorMessage(error));
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    throw new ResultsInputError(filePath, "results-input-unparseable", `invalid JSON: ${errorMessage(error)}`);
+  }
+}
 
 function isObject(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -536,9 +590,10 @@ export function writeCollectionOutputs(report, outputPath) {
 
 function readExpectationsFile(filePath) {
   try {
-    return loadExpectations(JSON.parse(readFileSync(filePath, "utf8")));
+    return loadExpectations(readResultsInput(filePath));
   } catch (error) {
-    throw new Error(`Could not read compatibility expectations: ${error instanceof Error ? error.message : String(error)}`);
+    if (error instanceof ResultsInputError) throw error;
+    throw new ResultsInputError(filePath, "results-input-invalid", errorMessage(error));
   }
 }
 
@@ -550,12 +605,13 @@ function runCellCli() {
 
 function runCollectCli() {
   let expectations = [];
-  let expectationsError;
+  let inputError;
   try {
-    expectations = readExpectationsFile("docs/compat-expectations.json");
+    expectations = readExpectationsFile(EXPECTATIONS_PATH);
   } catch (error) {
-    expectationsError = error instanceof Error ? error.message : String(error);
+    inputError = error;
   }
+  const expectationsError = inputError === undefined ? undefined : errorMessage(inputError);
 
   let report = collectResults({
     matrixJson: process.env.MATRIX_JSON ?? "",
@@ -587,6 +643,13 @@ function runCollectCli() {
   writeFileSync("compat-matrix.json", `${JSON.stringify(report, null, 2)}\n`, "utf8");
   writeCollectionOutputs(report, process.env.GITHUB_OUTPUT);
   console.log(`Classified ${report.cells.length} of ${report.expectedCellCount} expected compatibility cells.`);
+  if (inputError !== undefined) {
+    // #670: stdout and the written artifacts stay exactly as they are so the
+    // matrix summary and upload steps keep working; the unreadable input is
+    // reported on stderr with its path and fails the step with exit code 1.
+    console.error(formatCliError(inputError));
+    process.exitCode = 1;
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -595,7 +658,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     else if (process.argv[2] === "collect") runCollectCli();
     else throw new Error("Expected 'cell' or 'collect' mode.");
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(formatCliError(error));
     process.exitCode = 1;
   }
 }

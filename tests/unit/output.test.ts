@@ -604,6 +604,7 @@ describe("describeExitCode", () => {
     expect(describeExitCode(3).category).toBe("execution_error");
     expect(describeExitCode(4).category).toBe("invalid_fixture");
     expect(describeExitCode(5).category).toBe("internal_error");
+    expect(describeExitCode(6).category).toBe("verification_failure");
   });
 
   it("describes each documented exit code according to the engine contract", () => {
@@ -623,9 +624,13 @@ describe("describeExitCode", () => {
     expect(describeExitCode(5).description).toBe(
       "An internal error unrelated to configuration, fixtures, or the three compatibility surfaces.",
     );
+    expect(describeExitCode(6).description).toBe(
+      "Fixture verification failed against authoritative ledger or RPC evidence.",
+    );
   });
 
   it("falls back to unknown for an unrecognized code", () => {
+    expect(describeExitCode(7).category).toBe("unknown");
     expect(describeExitCode(99).category).toBe("unknown");
   });
 
