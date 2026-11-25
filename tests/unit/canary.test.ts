@@ -275,6 +275,10 @@ class FakeResponse extends EventEmitter {
 }
 
 class FakeRequest extends EventEmitter {
+  setTimeout(): this {
+    return this;
+  }
+
   destroy(error?: Error): void {
     if (error) {
       this.emit("error", error);
@@ -2515,6 +2519,29 @@ describe("bounded HTTP downloads (#500)", () => {
     const dest = path.join(dir, "asset");
     await httpsGetFile("https://github.com/StellarCanary/Protocol-Canary/releases/download/v0.2.0/asset", dest);
     expect(fs.statSync(dest).size).toBe(MAX_RELEASE_ASSET_BYTES);
+  });
+
+  it("fails with a retry exhaustion diagnostic after consecutive download timeouts", async () => {
+    httpsGetMock.mockImplementation(() => {
+      const request = new FakeRequest();
+      queueMicrotask(() => request.emit("timeout"));
+      return request;
+    });
+    const dest = path.join(dir, "asset");
+
+    const error = await httpsGetFile(
+      "https://github.com/StellarCanary/Protocol-Canary/releases/download/v0.2.0/asset",
+      dest,
+    ).catch((failure: unknown) => failure);
+
+    expect(error).toBeInstanceOf(InstallationFailedError);
+    if (!(error instanceof InstallationFailedError)) {
+      throw new Error("expected download retry exhaustion to raise InstallationFailedError");
+    }
+    expect(error.message).toContain("retry limit after 3 attempts");
+    expect(error.message).toContain("timed out downloading release asset");
+    expect(httpsGetMock).toHaveBeenCalledTimes(3);
+    expect(fs.existsSync(dest)).toBe(false);
   });
 
   it.each(["header", "stream", "lying header", "aborted", "close", "short"])("removes the partial file on %s rejection", async (kind) => {
