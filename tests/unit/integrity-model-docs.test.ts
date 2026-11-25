@@ -15,10 +15,12 @@
  * must resolve on disk (issue #376 "Negative testing: verify all
  * documentation links resolve cleanly"), and SECURITY.md must point at it.
  */
+import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 
 const REPO_ROOT = path.join(__dirname, "..", "..");
 const DOC_PATH = path.join(REPO_ROOT, "docs", "integrity-model.md");
@@ -38,6 +40,92 @@ function relativeLinkTargets(text: string): string[] {
     targets.push(target.split("#")[0] ?? "");
   }
   return targets.filter((target) => target !== "");
+}
+
+interface FencedCodeSnippet {
+  readonly language: string;
+  readonly content: string;
+}
+
+/** Extracts all fenced code blocks from markdown with their declared language. */
+function extractFencedSnippets(markdown: string): FencedCodeSnippet[] {
+  const snippets: FencedCodeSnippet[] = [];
+  for (const match of markdown.matchAll(/```([a-zA-Z0-9_-]+)?\r?\n([\s\S]*?)```/g)) {
+    snippets.push({
+      language: (match[1] ?? "").trim().toLowerCase(),
+      content: match[2] ?? "",
+    });
+  }
+  return snippets;
+}
+
+/** Validates YAML snippet syntax using the pinned YAML parser. */
+function validateYamlSnippet(snippet: string): void {
+  parseYaml(snippet);
+}
+
+/** Validates basic shell quote and delimiter balance when bash is unavailable. */
+function validateBasicShellSyntax(code: string): void {
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let escaped = false;
+  let parenDepth = 0;
+  let braceDepth = 0;
+
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && !inSingleQuote) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDoubleQuote) {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+    if (ch === '"' && !inSingleQuote) {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+    if (!inSingleQuote && !inDoubleQuote) {
+      if (ch === "(") parenDepth++;
+      else if (ch === ")") parenDepth--;
+      else if (ch === "{") braceDepth++;
+      else if (ch === "}") braceDepth--;
+      if (parenDepth < 0 || braceDepth < 0) {
+        throw new Error(`Unbalanced delimiter in shell code: ${code}`);
+      }
+    }
+  }
+  if (inSingleQuote || inDoubleQuote || parenDepth !== 0 || braceDepth !== 0) {
+    throw new Error(`Unterminated quotes or unclosed blocks in shell code: ${code}`);
+  }
+}
+
+/** Validates shell/bash syntax using bash -n with fallback to delimiter balance. */
+function validateBashSnippet(snippet: string): void {
+  const result = spawnSync("bash", ["-n", "-c", snippet], { encoding: "utf8" });
+  if (result.error) {
+    validateBasicShellSyntax(snippet);
+    return;
+  }
+  if (result.status !== 0) {
+    throw new Error(`Bash syntax error: ${result.stderr || result.stdout}`);
+  }
+}
+
+/** Extracts relative file paths referenced in backticks (e.g. `src/inputs.ts`). */
+function relativeFileReferences(text: string): string[] {
+  const refs: string[] = [];
+  for (const match of text.matchAll(/`((?:src|docs|tests)\/[^`\s]+\.[a-zA-Z0-9_-]+)`/g)) {
+    if (match[1]) {
+      refs.push(match[1]);
+    }
+  }
+  return refs;
 }
 
 describe("docs/integrity-model.md (issue #376)", () => {
@@ -86,5 +174,55 @@ describe("docs/integrity-model.md (issue #376)", () => {
   it("is linked from SECURITY.md", () => {
     const security = fs.readFileSync(path.join(REPO_ROOT, "SECURITY.md"), "utf8");
     expect(security).toContain("docs/integrity-model.md");
+  });
+
+  describe("code snippet syntax and link validity (#661)", () => {
+    it("all fenced YAML snippets in docs/integrity-model.md have valid syntax", () => {
+      const snippets = extractFencedSnippets(doc()).filter((s) =>
+        ["yaml", "yml"].includes(s.language),
+      );
+      for (const [index, snippet] of snippets.entries()) {
+        expect(() => validateYamlSnippet(snippet.content), `YAML snippet ${index} has invalid syntax`).not.toThrow();
+      }
+
+      // Non-vacuous check: verify parser fails on invalid YAML
+      expect(() => validateYamlSnippet("key: : invalid\n  bad-indent")).toThrow();
+    });
+
+    it("all fenced bash snippets in docs/integrity-model.md have valid syntax", () => {
+      const snippets = extractFencedSnippets(doc()).filter((s) =>
+        ["bash", "sh", "shell"].includes(s.language),
+      );
+      for (const [index, snippet] of snippets.entries()) {
+        expect(() => validateBashSnippet(snippet.content), `Bash snippet ${index} has invalid syntax`).not.toThrow();
+      }
+
+      // Non-vacuous check: verify bash validator rejects syntax errors
+      expect(() => validateBashSnippet("if true; then echo unclosed")).toThrow();
+    });
+
+    it("all relative markdown links in docs/integrity-model.md resolve to existing files on disk", () => {
+      const targets = relativeLinkTargets(doc());
+      expect(targets.length).toBeGreaterThan(0);
+      for (const target of targets) {
+        const resolved = path.resolve(path.dirname(DOC_PATH), target);
+        expect(
+          fs.existsSync(resolved),
+          `broken relative markdown link in docs/integrity-model.md: ${target} (resolved to ${resolved})`,
+        ).toBe(true);
+      }
+    });
+
+    it("all relative repository source file references in docs/integrity-model.md resolve on disk", () => {
+      const refs = relativeFileReferences(doc());
+      expect(refs.length).toBeGreaterThan(0);
+      for (const ref of refs) {
+        const resolved = path.resolve(REPO_ROOT, ref);
+        expect(
+          fs.existsSync(resolved),
+          `broken repository file reference in docs/integrity-model.md: ${ref} (resolved to ${resolved})`,
+        ).toBe(true);
+      }
+    });
   });
 });

@@ -264,7 +264,7 @@ describe("prebuilt release install failure paths (#495)", () => {
           res.emit("end");
         });
       } else if (url === DOWNLOAD_URL || url.startsWith("https://example.test/redirect-")) {
-        stopServingAfterDownload = true;
+        if (options.onDownload === undefined) stopServingAfterDownload = true;
         if (options.onDownload) {
           options.onDownload(res, req, callback);
         } else {

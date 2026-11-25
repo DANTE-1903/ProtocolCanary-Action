@@ -6,6 +6,8 @@ import type { CanaryReport } from "./output";
 import { protocolMismatchMessage } from "./summary";
 
 const TITLE = "Stellar Protocol Canary";
+const MAX_ERROR_ANNOTATIONS = 10;
+const MAX_WARNING_ANNOTATIONS = 10;
 
 const STATUS_LABEL: Readonly<Record<string, string>> = {
   fail: "compatibility failure",
@@ -22,19 +24,52 @@ const STATUS_LABEL: Readonly<Record<string, string>> = {
  * actionable.
  */
 export function emitAnnotations(report: CanaryReport): void {
+  let emittedErrors = 0;
+  let emittedWarnings = 0;
+  let omittedErrors = 0;
+  let omittedWarnings = 0;
+
   for (const result of report.results) {
     const label = STATUS_LABEL[result.status] ?? result.status;
     const message = `[${result.surface}] ${result.testId}: [${label}] ${result.summary}`;
     if (result.status === "fail" || result.status === "error") {
-      core.error(message, { title: TITLE });
+      if (emittedErrors < MAX_ERROR_ANNOTATIONS) {
+        core.error(message, { title: TITLE });
+        emittedErrors++;
+      } else {
+        omittedErrors++;
+      }
     } else if (result.status === "warning") {
-      core.warning(message, { title: TITLE });
+      if (emittedWarnings < MAX_WARNING_ANNOTATIONS) {
+        core.warning(message, { title: TITLE });
+        emittedWarnings++;
+      } else {
+        omittedWarnings++;
+      }
     }
   }
 
   const mismatchMessage = protocolMismatchMessage(report);
   if (mismatchMessage !== undefined) {
-    core.warning(mismatchMessage, { title: TITLE });
+    if (emittedWarnings < MAX_WARNING_ANNOTATIONS) {
+      core.warning(mismatchMessage, { title: TITLE });
+      emittedWarnings++;
+    } else {
+      omittedWarnings++;
+    }
+  }
+
+  if (omittedErrors > 0) {
+    const noun = omittedErrors === 1 ? "result" : "results";
+    core.info(
+      `Suppressed ${String(omittedErrors)} additional error ${noun} from workflow annotations (limit ${String(MAX_ERROR_ANNOTATIONS)} per step). See the job summary and report artifact for all results.`,
+    );
+  }
+  if (omittedWarnings > 0) {
+    const noun = omittedWarnings === 1 ? "result" : "results";
+    core.info(
+      `Suppressed ${String(omittedWarnings)} additional warning ${noun} from workflow annotations (limit ${String(MAX_WARNING_ANNOTATIONS)} per step). See the job summary and report artifact for all results.`,
+    );
   }
 }
 
