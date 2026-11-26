@@ -247,10 +247,48 @@ describe("scripts/run-local.mjs negative cases", () => {
     expect(result.stderr).toContain("does not exist");
   });
 
-  it("an --input without '=' is rejected with usage guidance", async () => {
+  it("an --input without '=' is rejected with usage guidance and exit code 2", async () => {
     const result = await runScript(["--engine", MOCK_ENGINE, "--input", "version"]);
-    expect(result.code).not.toBe(0);
+    expect(result.code).toBe(2);
     expect(result.stderr).toContain("NAME=VALUE");
+  });
+
+  it("an --input with no following value is a usage error (exit 2)", async () => {
+    const result = await runScript(["--engine", MOCK_ENGINE, "--input"]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("--input requires a value");
+  });
+
+  it("an --input with an empty name is rejected with exit code 2", async () => {
+    const result = await runScript(["--engine", MOCK_ENGINE, "--input", "=value"]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("NAME=VALUE");
+  });
+
+  it("an --input with an empty value is rejected with exit code 2", async () => {
+    const before = listTemp();
+    const result = await runScript(["--engine", MOCK_ENGINE, "--input", "version="]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("non-empty value");
+    expect(result.stderr).toContain("version");
+    expect(listTemp()).toEqual(before);
+  });
+
+  it("accepts space-separated --input NAME=VALUE pairs", async () => {
+    // Parsing succeeded if the run gets past argument handling to the engine
+    // path check; only the parse contract is asserted here.
+    const result = await runScript([
+      "--engine",
+      path.join(tmpDir, "no-such-engine"),
+      "--input",
+      "version=0.1.0",
+      "--input",
+      "allow-empty=true",
+    ]);
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("engine path does not exist");
+    expect(result.stderr).not.toContain("NAME=VALUE");
+    expect(result.stderr).not.toContain("non-empty value");
   });
 
   it("an engine path that does not exist is rejected without running the Action", async () => {
@@ -259,9 +297,9 @@ describe("scripts/run-local.mjs negative cases", () => {
     expect(result.stderr).toContain("does not exist");
   });
 
-  it("an unknown option is rejected and points at --help", async () => {
+  it("an unknown option is rejected with exit code 2 and points at --help", async () => {
     const result = await runScript(["--nonsense"]);
-    expect(result.code).not.toBe(0);
+    expect(result.code).toBe(2);
     expect(result.stderr).toContain("--help");
   });
 

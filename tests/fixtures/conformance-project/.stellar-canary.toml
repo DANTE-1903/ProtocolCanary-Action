@@ -2,10 +2,23 @@
 # (#370) and by tests/unit/reusable-workflow-conformance.test.ts. It gives the
 # reusable workflow an unambiguous `project-root` whose config and fixture
 # discovery resolve inside the repository's own test suite.
+
+# ---------------------------------------------------------------------------
+# Root table — the config schema version and the target protocol version.
+# ---------------------------------------------------------------------------
+
+# Schema version of this configuration file, as understood by the engine.
 version = 1
+# Stellar protocol version the sample fixtures are written against.
 protocol = 28
 
+# ---------------------------------------------------------------------------
+# [tests] — which fixture families this sample project runs.
+# ---------------------------------------------------------------------------
 [tests]
+# Run the XDR encoding/decoding fixtures.
 xdr = true
+# Run the RPC fixtures.
 rpc = false
+# Run the Soroban fixtures.
 soroban = false

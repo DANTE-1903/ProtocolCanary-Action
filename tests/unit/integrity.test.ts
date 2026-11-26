@@ -71,8 +71,14 @@ vi.mock("node:os", async (importOriginal) => {
   return { ...actual, homedir: osMocks.homedirMock };
 });
 
-import { ensureCanaryInstalled, prebuiltTargetTriple } from "../../src/canary";
-import { InstallationFailedError } from "../../src/errors";
+import {
+  ensureCanaryInstalled,
+  isCanonicalPackDigest,
+  prebuiltTargetTriple,
+  verifyDownloadedArchive,
+  verifyPackDigest,
+} from "../../src/canary";
+import { ChecksumMismatchError, InstallationFailedError } from "../../src/errors";
 import type { ResolvedVersion } from "../../src/version";
 
 const RESOLVED: ResolvedVersion = { version: "0.1.0", tag: "v0.1.0", commitSha: "abc123" };
@@ -588,5 +594,63 @@ describe("strict-integrity fail-closed policy at the verification boundary (issu
     expect(installed.binaryPath).toBe(binaryPath());
     expect(installed.version).toBe("0.1.0");
     expect(cargoInstallSpawned()).toBe(true);
+  });
+});
+
+describe("checksum validation of malformed digests (issue #675)", () => {
+  let tempDir: string;
+  let archivePath: string;
+  let actual: string;
+
+  beforeEach(() => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "canary-truncated-hash-"));
+    archivePath = path.join(tempDir, "protocol-28-0.1.0.tar.gz");
+    fs.writeFileSync(archivePath, "archive-bytes");
+    actual = sha256("archive-bytes");
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("rejects a truncated hash instead of prefix-matching the real digest", async () => {
+    for (const truncated of [actual.slice(0, 63), actual.slice(0, 32), actual.slice(0, 7)]) {
+      await expect(verifyDownloadedArchive(archivePath, truncated)).rejects.toBeInstanceOf(ChecksumMismatchError);
+    }
+  });
+
+  it("rejects a hash containing non-hexadecimal characters", async () => {
+    const nonHex = `z${actual.slice(1)}`;
+    expect(nonHex).toHaveLength(64);
+    await expect(verifyDownloadedArchive(archivePath, nonHex)).rejects.toBeInstanceOf(ChecksumMismatchError);
+  });
+
+  it("names both the malformed expected digest and the actual digest in its diagnostic", async () => {
+    const truncated = actual.slice(0, 32);
+    let thrown: unknown;
+    try {
+      await verifyDownloadedArchive(archivePath, truncated);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(ChecksumMismatchError);
+    const message = (thrown as Error).message;
+    expect(message).toContain(`expected SHA-256 ${truncated}`);
+    expect(message).toContain(actual);
+    expect(message).toContain("Refusing to extract it");
+  });
+
+  it("accepts the exact 64-character digest", async () => {
+    await expect(verifyDownloadedArchive(archivePath, actual)).resolves.toBe(actual);
+  });
+
+  it("rejects truncated and non-hexadecimal canonical pack digests", () => {
+    expect(isCanonicalPackDigest(`sha256:${actual}`)).toBe(true);
+    expect(isCanonicalPackDigest(`sha256:${actual.slice(0, 32)}`)).toBe(false);
+    expect(isCanonicalPackDigest(`sha256:${`z`.repeat(64)}`)).toBe(false);
+    expect(isCanonicalPackDigest(actual)).toBe(false);
+
+    expect(() => verifyPackDigest(tempDir, `sha256:${actual.slice(0, 32)}`)).toThrow(ChecksumMismatchError);
+    expect(() => verifyPackDigest(tempDir, `sha256:${actual.slice(0, 32)}`)).toThrow(/not a canonical CF-02 pack digest/);
   });
 });
