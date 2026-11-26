@@ -21,7 +21,7 @@ import { report, result } from "./helpers";
 // ─── @actions/core mock for writeSummary tests ────────────────────────────────
 
 const { summaryWriteMock } = vi.hoisted(() => ({
-  summaryWriteMock: vi.fn<[], Promise<typeof undefined>>(),
+  summaryWriteMock: vi.fn(),
 }));
 
 vi.mock("@actions/core", async (importOriginal) => {
