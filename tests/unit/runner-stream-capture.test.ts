@@ -5,6 +5,8 @@
  * stderr is prepended with STDERR_DROPPED_NOTICE, and that extractDiagnostic
  * correctly parses root error messages from large or truncated buffers.
  */
+import type * as actionsCore from "@actions/core";
+import type * as childProcess from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -25,13 +27,13 @@ const { spawnMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("node:child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:child_process")>();
+  const actual = await importOriginal<typeof childProcess>();
   spawnMock.mockImplementation(actual.spawn);
   return { ...actual, spawn: spawnMock };
 });
 
 vi.mock("@actions/core", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@actions/core")>();
+  const actual = await importOriginal<typeof actionsCore>();
   return { ...actual, info: vi.fn() };
 });
 

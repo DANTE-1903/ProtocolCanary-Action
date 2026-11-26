@@ -6,6 +6,8 @@
  * after the grace period when the process ignores SIGTERM, and that SIGKILL is
  * never sent when the process exits in response to SIGTERM.
  */
+import type * as actionsCore from "@actions/core";
+import type * as childProcess from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
@@ -19,13 +21,13 @@ const { spawnMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("node:child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:child_process")>();
+  const actual = await importOriginal<typeof childProcess>();
   spawnMock.mockImplementation(actual.spawn);
   return { ...actual, spawn: spawnMock };
 });
 
 vi.mock("@actions/core", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@actions/core")>();
+  const actual = await importOriginal<typeof actionsCore>();
   return { ...actual, info: vi.fn() };
 });
 

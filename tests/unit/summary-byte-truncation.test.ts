@@ -7,6 +7,7 @@
  * returned unchanged, that UTF-8 multi-byte boundaries are respected, and
  * that writeSummary wraps core.summary failures in SummaryPublishFailedError.
  */
+import type * as actionsCore from "@actions/core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { SummaryPublishFailedError } from "../../src/errors";
@@ -25,7 +26,7 @@ const { summaryWriteMock } = vi.hoisted(() => ({
 }));
 
 vi.mock("@actions/core", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@actions/core")>();
+  const actual = await importOriginal<typeof actionsCore>();
   return {
     ...actual,
     summary: {
