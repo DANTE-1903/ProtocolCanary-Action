@@ -28,7 +28,10 @@ const workflow = parse(fs.readFileSync(WORKFLOW_PATH, "utf8")) as {
 const trackerJob = workflow.jobs["track-failure"];
 const trackerScript = trackerJob?.steps.find((step) => step.id === "tracking")?.run;
 
-function runTracker(scenario: "missing-label" | "existing-issue" | "label-list-error", outcome: string) {
+function runTracker(
+  scenario: "missing-label" | "existing-issue" | "label-list-error" | "no-issue",
+  outcome: string,
+) {
   if (!trackerScript) {
     throw new Error("weekly-live tracker step was not found");
   }
@@ -113,6 +116,25 @@ describe("weekly live failure tracker", () => {
     expect(hasCall(result.calls, "issue", "create")).toBe(true);
     expect(hasCall(result.calls, "issue", "comment")).toBe(false);
   });
+
+  // Issue #627: the clean no-op path. A green run with no open tracking issue
+  // must exit 0 without touching issues at all — no creation, no comment, no
+  // close. The `no-issue` scenario keeps the `weekly-live` label present so the
+  // label-creation path of a first run cannot mask the no-op.
+  it.skipIf(process.platform === "win32")(
+    "does nothing and exits 0 when the run is green and no tracking issue is open",
+    () => {
+      const result = runTracker("no-issue", "success");
+
+      expect(result.status).toBe(0);
+      expect(hasCall(result.calls, "issue", "create")).toBe(false);
+      expect(hasCall(result.calls, "issue", "comment")).toBe(false);
+      expect(hasCall(result.calls, "issue", "close")).toBe(false);
+      expect(hasCall(result.calls, "label", "create")).toBe(false);
+      expect(result.stdout).toContain("nothing to do");
+      expect(result.stderr).toBe("");
+    },
+  );
 
   it.skipIf(process.platform === "win32")("comments on an existing issue instead of opening a duplicate", () => {
     const result = runTracker("existing-issue", "failure");

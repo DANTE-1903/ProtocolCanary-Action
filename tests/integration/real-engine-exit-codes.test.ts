@@ -7,7 +7,7 @@ import * as path from "node:path";
 import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
 /*
- * Issue #438: how the Action translates the REAL engine's exit codes 1, 3
+ * Issue #438: how the Action translates the REAL engine's exit codes 1, 2, 3
  * and 4 — and its skipped[] output — into a status, step failure, summary
  * and annotations. end-to-end.test.ts covers these paths only against the
  * mock engine (written by the same team as the mapping), and
@@ -116,7 +116,10 @@ function engineVersion(binary: string): string {
 
 /** One tiny generated pack (fixtures/, never committed) plus one generated
  * config, a runner environment, and clean INPUT_* state. */
-function setUp(version: string, options: { pack: "exit1" | "exit3" | "exit4" | "exit4-two-invalid" | "skipped" }): Case {
+function setUp(
+  version: string,
+  options: { pack: "exit1" | "exit2" | "exit3" | "exit4" | "exit4-two-invalid" | "skipped" },
+): Case {
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "canary-exit-code-"));
   const packDir = path.join(workDir, "fixtures");
   fs.mkdirSync(packDir, { recursive: true });
@@ -152,6 +155,16 @@ function setUp(version: string, options: { pack: "exit1" | "exit3" | "exit4" | "
       fs.writeFileSync(
         path.join(packDir, "p28-xdr-cap83-decode-failure.toml"),
         xdrFixture("p28-xdr-cap83-decode-failure", 28, "decode-failure"),
+      );
+      break;
+    }
+    case "exit2": {
+      // A configuration error (#626): the pack itself is fine, but the config
+      // file cannot be read. The engine must refuse the invocation with
+      // exit 2 before any check runs, so no report can exist.
+      fs.writeFileSync(
+        path.join(packDir, "p28-xdr-cap83-config-error.toml"),
+        xdrFixture("p28-xdr-cap83-config-error", 28, "roundtrip"),
       );
       break;
     }
@@ -214,12 +227,16 @@ function setUp(version: string, options: { pack: "exit1" | "exit3" | "exit4" | "
   }
 
   const config = path.join(workDir, "scenario.stellar-canary.toml");
-  fs.writeFileSync(
-    config,
-    options.pack === "exit3"
-      ? "version = 1\nprotocol = 28\n\n[tests]\nxdr = false\nrpc = true\n"
-      : "version = 1\nprotocol = 28\n\n[tests]\nxdr = true\nrpc = false\n",
-  );
+  // `exit2` hands the engine a config file it cannot parse (`[tests` is never
+  // closed), which is the documented configuration-error path (exit code 2,
+  // docs/contracts.md) rather than an invalid fixture (exit code 4).
+  let configBody = "version = 1\nprotocol = 28\n\n[tests]\nxdr = true\nrpc = false\n";
+  if (options.pack === "exit2") {
+    configBody = "version = 1\nprotocol = 28\n\n[tests\nxdr = true\n";
+  } else if (options.pack === "exit3") {
+    configBody = "version = 1\nprotocol = 28\n\n[tests]\nxdr = false\nrpc = true\n";
+  }
+  fs.writeFileSync(config, configBody);
 
   const cargoHome = path.join(workDir, "cargo-home");
   fs.mkdirSync(cargoHome, { recursive: true });
@@ -285,7 +302,7 @@ const binary = process.env.STELLAR_CANARY_BIN;
 const enabled = binary !== undefined && binary !== "" && process.platform !== "win32";
 const version = enabled ? engineVersion(binary) : "0.0.0";
 
-describe.skipIf(!enabled)(`Real-engine exit codes 1/3/4 and skips (engine ${version})`, () => {
+describe.skipIf(!enabled)(`Real-engine exit codes 1/2/3/4 and skips (engine ${version})`, () => {
   let current: Case | undefined;
 
   afterEach(() => {
@@ -338,6 +355,47 @@ describe.skipIf(!enabled)(`Real-engine exit codes 1/3/4 and skips (engine ${vers
       expect(errorMock.mock.calls.map((call) => String(call[0])).join("\n")).toContain(
         "exit code 1",
       );
+    },
+    CASE_BUDGET_MS,
+  );
+
+  // Issue #626: exit code 2 (configuration error) is part of the documented
+  // contract but was never exercised against the real binary. It is an
+  // execution failure — the run never produced a compatibility result — so it
+  // must fail the step with the exit code named in the message, the outputs
+  // and the summary, and it must leave no report behind.
+  it(
+    "exit 2: an unreadable configuration file is an execution failure, never a compatibility result",
+    async () => {
+      current = setUp(version, { pack: "exit2" });
+      await runAction();
+
+      expect(setFailedMock).toHaveBeenCalledTimes(1);
+      const reason = String(setFailedMock.mock.calls[0]?.[0]);
+      expect(reason).toContain("could not be executed");
+      expect(reason).toContain("exit code 2");
+
+      const outputs = readOutputs(current.outputPath);
+      expect(outputs.status).toBe("execution-failed");
+      expect(outputs.passed).toBe("0");
+      expect(outputs.total).toBe("0");
+      expect(outputs["coverage-state"]).toBe("none");
+
+      const summary = fs.readFileSync(SUMMARY_PATH, "utf8");
+      expect(summary).toContain("🚫 **ERROR**");
+      expect(summary).toContain("exit code 2");
+      expect(summary).not.toMatch(/Status:? *PASS/i);
+
+      // The execution-failure annotation carries the same classification, so
+      // the run page names exit code 2 instead of a bare "invalid report".
+      expect(errorMock.mock.calls.map((call) => String(call[0])).join("\n")).toContain(
+        "exit code 2",
+      );
+
+      // A configuration error dies before a report can be written, even
+      // though the pack contains one loadable fixture.
+      expect(fs.existsSync(current.reportPath)).toBe(false);
+      expect(fs.readdirSync(current.packDir)).toHaveLength(1);
     },
     CASE_BUDGET_MS,
   );
