@@ -107,7 +107,14 @@ function parseInputs(argv) {
             `--input expects NAME=VALUE (got ${JSON.stringify(raw)}), e.g. --input version=0.1.1`,
           );
         }
-        inputs.input.push([raw.slice(0, eq), raw.slice(eq + 1)]);
+        const name = raw.slice(0, eq);
+        const inputValue = raw.slice(eq + 1);
+        if (inputValue === "") {
+          throw new UsageError(
+            `--input expects a non-empty value for ${JSON.stringify(name)}, e.g. --input version=0.1.1`,
+          );
+        }
+        inputs.input.push([name, inputValue]);
         break;
       }
       default:
@@ -322,5 +329,8 @@ main()
   })
   .catch((error) => {
     process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
-    process.exitCode = 1;
+    // Argument and syntax problems are usage errors, not runtime failures:
+    // they follow the same exit-code contract as the missing --engine and
+    // bad-path checks above. Failures of the Action itself keep its code.
+    process.exitCode = error instanceof UsageError ? SCRIPT_USAGE_EXIT_CODE : 1;
   });
