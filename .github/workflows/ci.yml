@@ -81,7 +81,7 @@ jobs:
 
       - name: Test (Windows)
         if: matrix.os != 'ubuntu-latest'
-        run: npm test
+        run: npm test -- --reporter=verbose
 
       - name: Test with coverage (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
